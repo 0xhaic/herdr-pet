@@ -94,8 +94,9 @@ src/
   `spritesheetPath` 拒绝绝对路径与目录穿越。失败时保留当前宠物，不崩溃。
 - **通知安全**：外部文本（agent 标题等）必须做 AppleScript 字符串转义，
   命令参数用数组传递，禁止拼接 shell 字符串；不得把用户数据发到外部服务。
-- **透明合成固定为 `PostMultiplied` + 直通 alpha**：wgpu 30 的 Metal 后端下
-  `PreMultiplied` 会产生黑底（见 design 3.4），不要改回。
+- **透明合成固定为 `PostMultiplied` + 预乘 alpha 输出**：wgpu 30 的 Metal
+  后端下 `PreMultiplied` 会产生黑底，直通 alpha 会在浅色背景产生白边
+  （见 design 3.4），不要改回。
 - **配置原子写**：临时文件 + rename；路径固定为
   `$XDG_CONFIG_HOME/herdr-pet/config.json`，未设置时 `~/.config/herdr-pet/config.json`
   （不要用 `dirs::config_dir()`，macOS 上会指向 Application Support）。

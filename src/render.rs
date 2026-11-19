@@ -47,8 +47,12 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // PostMultiplied: the compositor multiplies RGB by alpha.
-    return textureSample(atlas, atlas_sampler, in.uv);
+    // macOS composites the non-opaque CAMetalLayer as premultiplied alpha.
+    // wgpu's `PostMultiplied` only makes the layer non-opaque on Metal; the
+    // window server does not actually multiply RGB by alpha. Keep the atlas
+    // straight, but premultiply here or every soft edge glows white.
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    return vec4<f32>(texel.rgb * texel.a, texel.a);
 }
 "#;
 
@@ -96,8 +100,8 @@ impl Renderer {
             .context("surface reports no texture formats")?;
         // wgpu 30's Metal backend only makes CAMetalLayer non-opaque for
         // PostMultiplied; PreMultiplied leaves the layer opaque (black
-        // window). The compositor multiplies RGB by alpha, so the shader
-        // outputs straight alpha.
+        // window). The layer is still composited as premultiplied alpha,
+        // so the shader premultiplies its output.
         let alpha_mode = if capabilities
             .alpha_modes
             .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
@@ -220,7 +224,8 @@ impl Renderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    // The quad covers the whole window; keep straight alpha.
+                    // The quad covers the whole window; write premultiplied
+                    // output as-is.
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

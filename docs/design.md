@@ -202,12 +202,13 @@ Socket 发现顺序：
 ### 3.4 `render.rs` — wgpu 渲染
 
 - 一张 atlas 纹理（RGBA，sRGB），一个 quad，uniform 只含 UV 矩形。
-- 片元着色器输出直通 RGBA（不预乘）；quad 覆盖整个窗口，混合用
-  `REPLACE`；clear 为全透明。
+- 片元着色器输出预乘 alpha 的 RGBA（采样后 `rgb * a`）；quad 覆盖整个窗口，
+  混合用 `REPLACE`；clear 为全透明。
 - `alpha_mode` 用 `PostMultiplied`：wgpu 30 的 Metal 后端仅在
   `PostMultiplied` 时把 CAMetalLayer 设为非不透明；`PreMultiplied` 会得到
-  黑底（2026-11-19 实机验证）。该模式下合成器负责把 RGB 乘以 alpha，所以
-  着色器保持直通 alpha。
+  黑底（2026-11-19 实机验证）。但 Metal / 窗口服务器仍按预乘 alpha 合成
+  （该模式只改 opaque 标记，不会真的乘 alpha），所以着色器必须预乘；
+  直通 alpha 会让宠物边缘在浅色背景上发白（2026-11-19 实机验证）。
 - 采样器线性过滤（非像素风宠物也好看）；纹理坐标 clamp。
 - 60 fps 连续重绘（首版从简）；后续可优化为"帧变化时才重绘"。
 - 切换宠物时重建纹理与 bind group；失败则保留旧纹理。
@@ -333,8 +334,9 @@ Socket 发现顺序：
 ## 7. 风险与待定项
 
 - **wgpu 30 API 变动**：已按 wgpu 30 实际 API 校准；渲染层保持薄。
-- **macOS 透明窗口合成**：wgpu 30 + Metal 下必须用 `PostMultiplied` 并输出
-  直通 alpha；`PreMultiplied` 会出现黑底（已实机验证，见 3.4）。
+- **macOS 透明窗口合成**：wgpu 30 + Metal 下必须用 `PostMultiplied` 并把
+  片元颜色预乘 alpha；`PreMultiplied` 会出现黑底、直通 alpha 会在浅色背景
+  出现白边（均已实机验证，见 3.4）。
 - **tray-icon × winit**：已验证 0.26 + winit 0.30 在 `resumed` 中创建、
   菜单事件非阻塞轮询可用；保留 3.7 的降级路径。
 - **焦点抢占**：Accessory 策略下点击宠物目前不会把 App 带到前台；若后续
