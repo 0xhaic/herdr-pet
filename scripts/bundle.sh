@@ -14,8 +14,9 @@ fi
 cargo build --release --manifest-path "$ROOT/Cargo.toml" --target "$TARGET"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/target/$TARGET/release/herdr-pet" "$APP/Contents/MacOS/herdr-pet"
+cp "$ROOT/packaging/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 sed "s/@VERSION@/$VERSION/g" "$ROOT/packaging/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist" > /dev/null
 # ad-hoc 签名：Apple Silicon 要求 arm64 可执行文件带签名；不含 Developer ID/公证。

@@ -6,6 +6,8 @@
 	<string>dev.herdr.pet</string>
 	<key>CFBundleName</key>
 	<string>herdr-pet</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleExecutable</key>
 	<string>herdr-pet</string>
 	<key>CFBundlePackageType</key>
