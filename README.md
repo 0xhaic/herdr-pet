@@ -9,9 +9,10 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **逐像素点击穿透**：鼠标落在宠物透明区域时穿透到桌面，落在宠物本体上可拖拽移动；松开后自动保存位置。
 - **状态汇总**：汇总本机所有 herdr agent，一只宠物显示最紧急的状态，优先级
   `Blocked > Error > Done > Working > Idle`。
-- **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃后检查、error 播放失败动作；
+- **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后回到坐姿、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
-- **鼠标凝视**：空闲时宠物看向鼠标方向（16 个方向，需素材包含 look 行）。
+- **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
+- **鼠标凝视**：空闲且未悬停时宠物看向鼠标方向（16 个方向，需素材包含 look 行）。
 - **提醒**：agent 进入 blocked / done 时弹系统通知并播放提示音（Basso / Glass）；
   是否提醒与是否播放音效可分别开关，同一帧内的多条提醒会合并。
 - **菜单栏控制**：显示/隐藏、切换宠物、缩放、点击穿透、提醒开关、通知音效、退出。
@@ -118,14 +119,15 @@ scripts/bundle.sh aarch64-apple-darwin # 指定目标
 | --- | --- |
 | working | running（循环） |
 | blocked | waving 一次 → waiting（循环） |
-| done | jumping 一次 → review（循环） |
+| done | jumping 一次 → idle（坐姿循环） |
 | error | failed（循环） |
 | idle | idle（循环）；连续 idle 15–30 秒随机 waving / jumping 一次后回到 idle |
 | 拖动中 | running-left / running-right |
+| 鼠标悬停 | jumping ×3 → idle；覆盖除拖拽外的状态 |
 | idle + 鼠标靠近 | look 行 9/10，按 16 方向选列 |
 
 提醒只在状态**变化沿**触发：进入 blocked 或 done 时提醒，初始快照不提醒；
-拖拽或凝视会打断 idle 计时与随机动作。
+拖拽、凝视或悬停会打断 idle 计时与随机动作。
 
 ## 宠物素材
 

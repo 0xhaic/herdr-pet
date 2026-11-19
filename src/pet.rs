@@ -25,6 +25,10 @@ const IDLE_ACTION_MIN_MS: u64 = 15_000;
 const IDLE_ACTION_RANGE_MS: u64 = 15_001;
 const IDLE_ACTIONS: [Action; 2] = [Action::Waving, Action::Jumping];
 
+/// Hover reactions play the jumping row this many times before settling into
+/// the idle loop, matching Codex's pet component.
+const HOVER_JUMPS: u64 = 3;
+
 const DEFAULT_SPRITESHEET: &str = "spritesheet.webp";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -277,7 +281,6 @@ pub enum Action {
     Failed,
     Waiting,
     Running,
-    Review,
 }
 
 impl Action {
@@ -291,7 +294,6 @@ impl Action {
             Action::Failed => 5,
             Action::Waiting => 6,
             Action::Running => 7,
-            Action::Review => 8,
         }
     }
 
@@ -304,7 +306,6 @@ impl Action {
             Action::Failed => &[140, 140, 140, 140, 140, 140, 140, 240],
             Action::Waiting => &[150, 150, 150, 150, 150, 260],
             Action::Running => &[120, 120, 120, 120, 120, 220],
-            Action::Review => &[150, 150, 150, 150, 150, 280],
         }
     }
 
@@ -320,11 +321,11 @@ impl Action {
 
     /// Status-entry rows that hand over to their looping row. Waving and
     /// jumping only appear as entries for Blocked and Done; ambient idle
-    /// gestures are tracked separately by `Base::Ambient`.
+    /// gestures and hover reactions are tracked separately.
     fn next_after_one_shot(self) -> Option<Self> {
         match self {
             Action::Waving => Some(Action::Waiting),
-            Action::Jumping => Some(Action::Review),
+            Action::Jumping => Some(Action::Idle),
             _ => None,
         }
     }
@@ -386,6 +387,7 @@ pub struct AnimInput {
     pub mood: Mood,
     pub dragging: Option<DragDir>,
     pub gaze: Option<GazeCell>,
+    pub hover: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,6 +400,7 @@ pub struct Frame {
 enum Active {
     Base,
     Drag(DragDir),
+    Hover,
     Look,
 }
 
@@ -480,9 +483,10 @@ impl Animator {
     }
 
     pub fn update(&mut self, now_ms: u64, input: AnimInput) -> Frame {
-        let active = match (input.dragging, input.gaze) {
-            (Some(dir), _) => Active::Drag(dir),
-            (None, Some(_)) if self.look_enabled && input.mood == Mood::Idle => Active::Look,
+        let active = match (input.dragging, input.hover, input.gaze) {
+            (Some(dir), _, _) => Active::Drag(dir),
+            (None, true, _) => Active::Hover,
+            (None, false, Some(_)) if self.look_enabled && input.mood == Mood::Idle => Active::Look,
             _ => Active::Base,
         };
 
@@ -508,6 +512,21 @@ impl Animator {
                     DragDir::Right => Action::RunningRight,
                 };
                 self.frame_at(now_ms)
+            }
+            Active::Hover => {
+                let jump = Action::Jumping.total_ms();
+                let elapsed = now_ms.saturating_sub(self.row_started_ms);
+                if elapsed < HOVER_JUMPS * jump {
+                    Frame {
+                        row: Action::Jumping.row(),
+                        col: frame_index(Action::Jumping, elapsed % jump, false) as u32,
+                    }
+                } else {
+                    Frame {
+                        row: Action::Idle.row(),
+                        col: frame_index(Action::Idle, elapsed - HOVER_JUMPS * jump, false) as u32,
+                    }
+                }
             }
             Active::Base => {
                 if input.mood != self.mood {
@@ -609,6 +628,16 @@ mod tests {
             mood,
             dragging,
             gaze,
+            hover: false,
+        }
+    }
+
+    fn hover_input(mood: Mood, gaze: Option<GazeCell>) -> AnimInput {
+        AnimInput {
+            mood,
+            dragging: None,
+            gaze,
+            hover: true,
         }
     }
 
@@ -837,7 +866,7 @@ mod tests {
         for (mood, entry_row, settled_row) in [
             (Mood::Working, 7, 7),
             (Mood::Blocked, 3, 6),
-            (Mood::Done, 4, 8),
+            (Mood::Done, 4, 0),
             (Mood::Failed, 5, 5),
         ] {
             let mut animator = Animator::with_seed(false, 0);
@@ -916,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn done_plays_jumping_then_review() {
+    fn done_plays_jumping_then_idle() {
         let mut animator = Animator::new(true);
         assert_eq!(
             animator.update(0, input(Mood::Done, None, None)),
@@ -928,12 +957,73 @@ mod tests {
         );
         assert_eq!(
             animator.update(840, input(Mood::Done, None, None)),
-            Frame { row: 8, col: 0 }
+            Frame { row: 0, col: 0 }
         );
         assert_eq!(
-            animator.update(1000, input(Mood::Done, None, None)),
-            Frame { row: 8, col: 1 }
+            animator.update(2520, input(Mood::Done, None, None)),
+            Frame { row: 0, col: 1 }
         );
+    }
+
+    #[test]
+    fn hover_plays_three_jumps_then_idle() {
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, hover_input(Mood::Working, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(839, hover_input(Mood::Working, None)),
+            Frame { row: 4, col: 4 }
+        );
+        assert_eq!(
+            animator.update(840, hover_input(Mood::Working, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(2520, hover_input(Mood::Working, None)),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(4200, hover_input(Mood::Working, None)),
+            Frame { row: 0, col: 1 }
+        );
+    }
+
+    #[test]
+    fn hover_overrides_gaze_and_drag_takes_precedence() {
+        let mut animator = Animator::new(true);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+        assert_eq!(
+            animator.update(0, hover_input(Mood::Idle, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(
+                100,
+                AnimInput {
+                    mood: Mood::Idle,
+                    dragging: Some(DragDir::Right),
+                    gaze: None,
+                    hover: true,
+                }
+            ),
+            Frame { row: 1, col: 0 }
+        );
+    }
+
+    #[test]
+    fn leaving_hover_returns_to_mood() {
+        let mut animator = Animator::with_seed(false, 0);
+        assert_eq!(
+            animator.update(100, hover_input(Mood::Idle, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(1_100, input(Mood::Idle, None, None)),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(animator.next_idle_action_ms, 16_100);
     }
 
     #[test]

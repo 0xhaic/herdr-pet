@@ -1,7 +1,8 @@
 # herdr-pet 设计方案
 
-> 当前状态：M0–M6 已实现（M6 含实机回归与文档校准）；长待机随机动作已实现并实机验证。
-> `cargo test`（69 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
+> 当前状态：M0–M6 已实现（M6 含实机回归与文档校准）；长待机随机动作、坐姿默认与
+> 悬停跳动已实现并实机验证。
+> `cargo test`（71 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
@@ -88,7 +89,7 @@ herdr-core (Unix socket, JSON-RPC)
 | 5 | failed | 8 | error/崩溃 |
 | 6 | waiting | 6 | blocked 等待输入 |
 | 7 | running | 6 | working（打字/处理） |
-| 8 | review | 6 | done 后续检查 |
+| 8 | review | 6 | 素材保留；当前状态机不使用 |
 | 9 | look A | 8 | 凝视 000°–157.5° |
 | 10 | look B | 8 | 凝视 180°–337.5° |
 
@@ -102,7 +103,6 @@ herdr-core (Unix socket, JSON-RPC)
 - failed：`[140 × 7, 240]`
 - waiting：`[150 × 5, 260]`
 - running：`[120 × 5, 220]`
-- review：`[150 × 5, 280]`
 - 凝视行由鼠标角度直接选列，不按时间播放。
 
 来源说明：动作行命名与状态→动作映射沿用 Codex 契约（hatch-pet 文档与
@@ -114,11 +114,12 @@ idle 时长取自 herdr-pet `src/sprites.rs`。后续若与真实 Codex 行为�
 ```text
 Mood::Working  -> running（循环）
 Mood::Blocked  -> waving（一次） -> waiting（循环）
-Mood::Done     -> jumping（一次） -> review（循环）
+Mood::Done     -> jumping（一次） -> idle（循环）
 Mood::Failed   -> failed（循环）
 Mood::Idle     -> idle（循环）-> 长待机随机 waving / jumping（一次）-> idle
 拖动中         -> running-right / running-left（覆盖 Mood）
 Idle + 凝视     -> look row 9/10（覆盖 idle，仅当 atlas 有 11 行）
+鼠标悬停       -> jumping ×3 -> idle（覆盖除拖拽外的状态）
 ```
 
 - 一次性行播完用余量时间进入下一行，不丢帧。
@@ -127,11 +128,17 @@ Idle + 凝视     -> look row 9/10（覆盖 idle，仅当 atlas 有 11 行）
   每段连续 idle 满 15–30 秒后随机选择 waving 或 jumping，播完回到 idle。
   15–30 秒包含两端；随机源用可注入种子的轻量 PRNG，不新增依赖。
   其他 Mood 不用随机动作覆盖，以免遮蔽工作状态。idle 计时只在 Base + Idle 状态下推进；
-  拖拽或凝视打断当前 idle/随机动作，返回时从头播放当前 Mood 的入场动作并重置 idle 计时。
+  拖拽、凝视或悬停打断当前 idle/随机动作，返回时从头播放当前 Mood 的入场动作并重置 idle 计时。
 - 凝视：`angle = atan2(dx, -dy)`，0° 向上，顺时针每 22.5° 一格，共 16 格；
   距离小于死区（24 logical px）回落到 idle。鼠标在宠物正上方时 `000`。
-- 测试锚点：`frame_index` 边界、waving→waiting、jumping→review、idle 随机动作的
-  阈值/选择/回退/打断与重置、8 个基本方向、16 格取整、死区、无凝视行时回落 idle。
+- 悬停：与 Codex 宠物组件的 `respondToHover` 一致。鼠标进入宠物窗口矩形即悬停，
+  播放 jumping 3 次后进入 idle 坐姿循环；悬停期间覆盖除拖拽外的状态并暂停凝视，
+  移出后恢复当前 Mood（重置 idle 计时）。
+- Done 不再循环 review：herdr 的 done 会长期存在，review 会让宠物一直站立；
+  jumping 播完回到 idle 坐姿，保留变化沿提醒但不阻塞默认坐姿。
+- 测试锚点：`frame_index` 边界、waving→waiting、jumping→idle、idle 随机动作的
+  阈值/选择/回退/打断与重置、悬停 jumping×3→idle、悬停覆盖凝视、拖拽优先、
+  8 个基本方向、16 格取整、死区、无凝视行时回落 idle。
 
 ### 3.2 `status.rs` — agent 状态表与聚合（纯逻辑，可单测）
 
@@ -157,7 +164,7 @@ AgentStatus   { Idle, Working, Done, Error, Blocked }   // Ord 即紧急度
   单测锚点：父、子同时 blocked 时 `blocked == 2`。
 - herdr 语义：`done` 表示"你没看的时候完成了"；任一 Herdr 客户端查看后会转为
   `idle`。pet 只是事实订阅者，订阅是否触发该转换尚未实测，因此不要把 done→idle
-  当作必然事件；宠物在 review 行等待下一次状态变化即可。
+  当作必然事件；宠物播放一次 jumping 提醒后回到 idle 坐姿，等待下一次状态变化。
 
 ### 3.3 `herdr.rs` — JSON-RPC 客户端
 

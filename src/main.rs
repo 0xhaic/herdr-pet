@@ -344,6 +344,30 @@ impl App {
         )
     }
 
+    /// Codex treats the pet's bounding box as the hover target; the window is
+    /// sized to one sprite cell, so the window rect is that box.
+    fn hovered(&self, pointer: Option<(f64, f64)>) -> bool {
+        if self.dragging.is_some() {
+            return false;
+        }
+        let Some(window) = self.window.as_ref() else {
+            return false;
+        };
+        if !window.is_visible().unwrap_or(true) {
+            return false;
+        }
+        let Some(pointer) = pointer else {
+            return false;
+        };
+        let Ok(position) = window.outer_position() else {
+            return false;
+        };
+        let size = window.inner_size();
+        let x = pointer.0 - f64::from(position.x);
+        let y = pointer.1 - f64::from(position.y);
+        (0.0..f64::from(size.width)).contains(&x) && (0.0..f64::from(size.height)).contains(&y)
+    }
+
     fn update_cursor(&self, pointer: Option<(f64, f64)>, frame: Frame) {
         let Some(window) = self.window.as_ref() else {
             return;
@@ -391,6 +415,7 @@ impl App {
         self.update_drag(pointer);
         let mood = mood_for(self.table.aggregate().status);
         let gaze = self.gaze(pointer);
+        let hover = self.hovered(pointer);
         let dragging = self.dragging.map(|drag| drag.dir);
         let now_ms = self.started.elapsed().as_millis() as u64;
         let frame = self.animator.update(
@@ -399,6 +424,7 @@ impl App {
                 mood,
                 dragging,
                 gaze,
+                hover,
             },
         );
 
