@@ -4,10 +4,10 @@
 > 悬停跳动已实现并实机验证；透明合成改为预乘 alpha，浅色背景白边已修复并实机验证。
 > v0.1.2：应用图标与托盘图标已按「探头」方向落地（2026-11）；`.app` 携带 `AppIcon.icns`，
 > 菜单栏使用与应用图标同轮廓的方形 alpha 模板图（圆角底板实心、猫头镂空）。
-> `cargo test`（74 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
-> 2026-11-19 修正 status 事件解码：根 7501 记录在 `data.status` 下；修复后状态变化
-> 会立即驱动动画并在 blocked/done 变化沿发送通知（已用真实 herdr-core 0.1.21 验证）。
-> 通知改为应用内原生发送，横幅图标与 `AppIcon` 统一（无 bundle 身份时回落 osascript）。
+> v0.1.3：修正 status 事件解码（根 7501 记录在 `data.status` 下），状态变化会立即驱动
+> 动画并在 blocked/done 变化沿发送通知；通知改为应用内原生发送，横幅图标与 `AppIcon`
+> 统一（无 bundle 身份时回落 osascript）。`cargo test`（74 项）、`cargo build`、
+> `cargo clippy --all-targets -- -D warnings` 全绿，已用真实 herdr-core 0.1.21 实机验证。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 

@@ -59,13 +59,17 @@ scripts/bundle.sh aarch64-apple-darwin # 指定目标
 脚本在 `dist/` 下组装 `Contents/MacOS/herdr-pet`、`Contents/Resources/AppIcon.icns`
 与 `packaging/Info.plist`，并做 ad-hoc 签名（不含 Developer ID 与公证）。
 
+`.app` 内使用应用自身身份发送系统通知，通知横幅的图标与应用图标一致；首次发送时
+macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行裸二进制时没有 bundle
+身份，会回落到 `osascript`，此时图标由系统按 Script Editor 显示。
+
 应用图标采用「探头」方向（`assets/app-icon.svg` → `packaging/AppIcon.icns`，1024 px，
 824 px 圆角底板）。应用以 `LSUIElement` 运行，不在 Dock 显示；图标用于 Finder、DMG 与通知。
 设计探索稿见 `design/logo-preview.html`（不参与打包）。
 
 推送到 GitHub 后，`.github/workflows/macos-release.yml` 可在 CI 中打包：
 
-- 推送 `v*` tag（如 `v0.1.2`）自动触发，或从 Actions 页面手动触发；
+- 推送 `v*` tag（如 `v0.1.3`）自动触发，或从 Actions 页面手动触发；
 - 先运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
 - 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.dmg` 并上传为 artifact；
 - tag 构建会同时创建同名 GitHub Release 并附带该 dmg（手动触发只产出 artifact）。
