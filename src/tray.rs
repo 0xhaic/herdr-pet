@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-/// 22 pt @2x monochrome cat-head glyph; drawn as a macOS template image.
+/// 22 pt @2x monochrome square plate with a cat-shaped cut-out; drawn as a macOS template image.
 const ICON_BYTES: &[u8] = include_bytes!("../assets/tray-icon.png");
 const ID_SHOW: &str = "show";
 const ID_NEXT_PET: &str = "next-pet";

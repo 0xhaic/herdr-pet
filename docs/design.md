@@ -2,8 +2,8 @@
 
 > 当前状态：M0–M6 已实现（M6 含实机回归与文档校准）；长待机随机动作、坐姿默认与
 > 悬停跳动已实现并实机验证；透明合成改为预乘 alpha，浅色背景白边已修复并实机验证。
-> v0.1.2：应用图标与托盘剪影已按「探头」方向落地（2026-11）；`.app` 携带 `AppIcon.icns`，
-> 菜单栏继续使用同一猫头的 alpha 模板图。
+> v0.1.2：应用图标与托盘图标已按「探头」方向落地（2026-11）；`.app` 携带 `AppIcon.icns`，
+> 菜单栏使用与应用图标同轮廓的方形 alpha 模板图（圆角底板实心、猫头镂空）。
 > `cargo test`（71 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
@@ -254,10 +254,11 @@ Socket 发现顺序：
 
 ### 3.7 `tray.rs` — 菜单栏
 
-- `tray-icon` + `muda`。图标为内置单色猫头剪影 `assets/tray-icon.png`
+- `tray-icon` + `muda`。图标为内置方形模板图 `assets/tray-icon.png`
   （22 pt @2x，44×44 RGBA，`include_bytes!` 嵌入二进制），与宠物素材无关；
   macOS 上按模板图（`with_icon_templated`）渲染，只取 alpha，由系统按菜单栏明暗反色。
-  剪影与应用图标共用同一猫头几何（圆脸、双耳、两只眼睛开孔）；切换宠物不更新托盘图标。
+  图形与应用图标共用同一圆角方形底板与猫头几何：底板实心，猫头与双耳为镂空负空间，
+  眼睛由底板透出；切换宠物不更新托盘图标。
 - 菜单：显示/隐藏、下一只宠物、放大、缩小、点击穿透开关、提醒开关、通知音效开关、退出。
 - 菜单事件在每帧 tick 中非阻塞 `try_recv`。
 - 若 tray-icon 与 winit 集成失败：降级为"无托盘 + 键盘快捷键退出"，
@@ -299,8 +300,10 @@ Socket 发现顺序：
   设置 `CFBundleIconFile=AppIcon`，`scripts/bundle.sh` 将其复制到
   `Contents/Resources/AppIcon.icns`。应用以 `LSUIElement` 运行，不在 Dock 显示；图标
   用于 Finder、DMG 与通知。
-- 托盘：`assets/tray-icon.png` 为 44×44 RGBA 黑/透明模板图，与应用图标共用同一猫头
-  几何，只取 alpha；视觉尺寸与旧图标一致（内容边界 7,6–37,39），由系统按明暗反色。
+- 托盘：`assets/tray-icon.png` 为 44×44 RGBA 黑/透明模板图，直接复用应用图标的
+  1024 坐标（等比缩放到 44 px，底板约 35 px 并居中留白）；圆角底板实心，猫头与双耳
+  镂空为负空间，眼睛由底板透出；只取 alpha，由系统按明暗反色。源文件
+  `assets/tray-icon.svg`，与应用图标分开维护。
 - 图标源文件与应用代码分开：SVG 是唯一可编辑源，PNG/ICNS 是导出产物；不引入生成式
   位图或额外的图标构建依赖。
 - 三方向探索稿与尺寸/托盘测试页保留在 `design/logo-preview.html`，作为设计源随仓库保存，
