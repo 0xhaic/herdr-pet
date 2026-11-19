@@ -1,7 +1,7 @@
 # herdr-pet 设计方案
 
 > 当前状态：M0–M6 已实现（M6 含实机回归与文档校准）；长待机随机动作、坐姿默认与
-> 悬停跳动已实现并实机验证。
+> 悬停跳动已实现并实机验证；透明合成改为预乘 alpha，浅色背景白边已修复并实机验证。
 > `cargo test`（71 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。

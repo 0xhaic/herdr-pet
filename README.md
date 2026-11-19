@@ -61,7 +61,7 @@ scripts/bundle.sh aarch64-apple-darwin # 指定目标
 
 推送到 GitHub 后，`.github/workflows/macos-release.yml` 可在 CI 中打包：
 
-- 推送 `v*` tag（如 `v0.1.0`）自动触发，或从 Actions 页面手动触发；
+- 推送 `v*` tag（如 `v0.1.1`）自动触发，或从 Actions 页面手动触发；
 - 先运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
 - 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.dmg` 并上传为 artifact；
 - tag 构建会同时创建同名 GitHub Release 并附带该 dmg（手动触发只产出 artifact）。
