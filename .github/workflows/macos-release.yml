@@ -1,0 +1,66 @@
+name: macOS package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add arm64 target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Check
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Bundle .app
+        run: scripts/bundle.sh aarch64-apple-darwin
+
+      - name: Verify bundle
+        run: |
+          file dist/herdr-pet.app/Contents/MacOS/herdr-pet
+          codesign -dv dist/herdr-pet.app
+
+      - name: Zip
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          ditto -c -k --keepParent dist/herdr-pet.app "dist/herdr-pet-${version}-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herdr-pet-macos-arm64
+          path: dist/*.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/*.zip --clobber
+          else
+            gh release create "$tag" dist/*.zip --title "$tag" \
+              --notes "macOS arm64 构建，未签名/未公证。首次启动请右键 → 打开，或执行：xattr -dr com.apple.quarantine /Applications/herdr-pet.app"
+          fi
