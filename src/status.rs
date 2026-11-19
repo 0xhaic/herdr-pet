@@ -9,12 +9,15 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::Value;
 
-/// Urgency order: `Idle < Working < Done < Error < Blocked`.
+/// Display priority: `Idle < Done < Working < Error < Blocked`.
+///
+/// Working outranks Done so live but stale `done` terminals do not mask tasks
+/// that are still executing; the pet stands only while work is in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentStatus {
     Idle,
-    Working,
     Done,
+    Working,
     Error,
     Blocked,
 }
@@ -367,13 +370,17 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_priority_is_blocked_error_done_working_idle() {
+    fn aggregate_priority_is_blocked_error_working_done_idle() {
         let mut table = StatusTable::new();
         table.apply_snapshot(vec![
             terminal("t1", "live", Some("working")),
             terminal("t2", "live", Some("done")),
             terminal("t3", "live", Some("idle")),
         ]);
+        // Stale done terminals must not mask a task that is still executing.
+        assert_eq!(table.aggregate().status, Some(AgentStatus::Working));
+
+        table.apply_event(status_event("t1", "done"));
         assert_eq!(table.aggregate().status, Some(AgentStatus::Done));
 
         table.apply_event(status_event("t1", "error"));

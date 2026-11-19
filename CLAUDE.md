@@ -72,7 +72,8 @@ src/
 
 - **先读 `docs/design.md`**；状态优先级、动画映射、帧时长、JSON-RPC 事件类型以它为准，
   不要凭感觉改。关键点：
-  - 聚合优先级 `Blocked > Error > Done > Working > Idle`；只统计 live 且带 status 的终端。
+  - 聚合优先级 `Blocked > Error > Working > Done > Idle`；只统计 live 且带 status 的终端。
+    Working 高于 Done：只有任务执行中才显示站立（running），done 只做一次跳跃提醒。
   - 计数按 terminal address；父 agent 与子 agent（`parent` 非空）各算一个，不做父子去重。
   - 动画：working→running，blocked→waving→waiting，done→jumping→idle，
     error→failed，idle→idle，拖动→running-left/right；鼠标悬停覆盖除拖拽外的

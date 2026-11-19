@@ -146,13 +146,14 @@ Idle + 凝视     -> look row 9/10（覆盖 idle，仅当 atlas 有 11 行）
 
 ```text
 TerminalAgent { address, title, name, labels, live, status: Option<AgentStatus>, status_ms }
-AgentStatus   { Idle, Working, Done, Error, Blocked }   // Ord 即紧急度
+AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先级
 ```
 
 - 只统计 `live == true` 且 `status.is_some()` 的终端；普通 shell 不计入。
-- 聚合优先级：`Blocked > Error > Done > Working > Idle`。
+- 聚合优先级：`Blocked > Error > Working > Done > Idle`。
   （herdr 自身是 `blocked > done > working > idle`；error 插在 blocked 之后，
-  保证"崩溃"能被看到。）
+  保证"崩溃"能被看到。Working 提到 Done 之前，避免长期存在的 done 终端压住
+  仍在执行的任务——站立只表示有任务在执行。）
 - 输出 `Aggregate { status: Option<AgentStatus>, blocked, error, done, working, total }`。
 - 通知规则：
   - 只在状态的**变化沿**提醒：进入 `Blocked` 或 `Done`（`old != new`）。

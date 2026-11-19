@@ -8,7 +8,7 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **独立透明窗口**：无边框、始终置顶、不显示 Dock 图标；切换 Space 或进入其它应用的全屏空间时保持可见。
 - **逐像素点击穿透**：鼠标落在宠物透明区域时穿透到桌面，落在宠物本体上可拖拽移动；松开后自动保存位置。
 - **状态汇总**：汇总本机所有 herdr agent，一只宠物显示最紧急的状态，优先级
-  `Blocked > Error > Done > Working > Idle`。
+  `Blocked > Error > Working > Done > Idle`（Working 高于 Done，站立只表示有任务在执行）。
 - **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后回到坐姿、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
 - **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
