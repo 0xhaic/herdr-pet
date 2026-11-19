@@ -344,7 +344,11 @@ mod tests {
                         "type": "status",
                         "terminal": "t1",
                         "seq": 8,
-                        "data": {"state": "blocked", "app": "claude-code"}
+                        "data": {
+                            "records": {},
+                            "reported": true,
+                            "status": {"state": "blocked", "app": "claude-code"}
+                        }
                     }
                 }),
             );

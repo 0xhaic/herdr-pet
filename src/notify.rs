@@ -1,15 +1,34 @@
-//! Desktop notifications and sounds. Never goes through a shell.
+//! Desktop notifications and sounds. Never goes through a shell for the
+//! osascript fallback.
 
 use std::process::Command;
 
+use crate::platform;
 use crate::status::{AgentStatus, StatusChange};
 
 /// One reminder for all changes collected in a frame; blocked wins.
 pub fn announce(changes: &[StatusChange], sound: bool) {
-    announce_with(changes, sound, run_detached);
+    announce_with(
+        changes,
+        sound,
+        |message| {
+            // Bundled runs use the app's own notification identity, so the
+            // banner carries the app icon; bare binaries have no bundle
+            // identifier and fall back to osascript.
+            if !platform::send_notification(message) {
+                run_detached(&mut osascript_command(message));
+            }
+        },
+        run_detached,
+    );
 }
 
-fn announce_with(changes: &[StatusChange], sound: bool, mut run: impl FnMut(&mut Command)) {
+fn announce_with(
+    changes: &[StatusChange],
+    sound: bool,
+    mut deliver: impl FnMut(&str),
+    mut run: impl FnMut(&mut Command),
+) {
     let Some(status) = merged_status(changes) else {
         return;
     };
@@ -22,16 +41,21 @@ fn announce_with(changes: &[StatusChange], sound: bool, mut run: impl FnMut(&mut
         .find(|change| change.status == status)
         .map(|change| change.text.as_str())
         .unwrap_or("agent");
-    let message = message_for(status, count, text);
-    let script = format!(
-        "display notification {} with title \"herdr-pet\"",
-        applescript_string(&message)
-    );
-    run(Command::new("osascript").arg("-e").arg(script));
+    deliver(&message_for(status, count, text));
     if sound {
         run(Command::new("afplay")
             .arg(format!("/System/Library/Sounds/{}.aiff", sound_for(status))));
     }
+}
+
+fn osascript_command(message: &str) -> Command {
+    let script = format!(
+        "display notification {} with title \"herdr-pet\"",
+        applescript_string(message)
+    );
+    let mut command = Command::new("osascript");
+    command.arg("-e").arg(script);
+    command
 }
 
 fn merged_status(changes: &[StatusChange]) -> Option<AgentStatus> {
@@ -150,18 +174,41 @@ mod tests {
     }
 
     #[test]
-    fn sound_can_be_disabled_without_muting_notifications() {
+    fn announcement_is_delivered_once_and_sound_follows_config() {
         let changes = [change(AgentStatus::Blocked, "task")];
-        let mut commands = Vec::new();
-        announce_with(&changes, false, |command| {
-            commands.push(command.get_program().to_owned());
-        });
-        assert_eq!(commands, ["osascript"]);
 
+        let mut delivered = Vec::new();
         let mut commands = Vec::new();
-        announce_with(&changes, true, |command| {
-            commands.push(command.get_program().to_owned());
-        });
-        assert_eq!(commands, ["osascript", "afplay"]);
+        announce_with(
+            &changes,
+            false,
+            |message| delivered.push(message.to_owned()),
+            |command| commands.push(command.get_program().to_owned()),
+        );
+        assert_eq!(delivered, ["task 等待输入"]);
+        assert!(commands.is_empty());
+
+        announce_with(
+            &changes,
+            true,
+            |_| {},
+            |command| commands.push(command.get_program().to_owned()),
+        );
+        assert_eq!(commands, ["afplay"]);
+    }
+
+    #[test]
+    fn osascript_fallback_quotes_external_text() {
+        let command = osascript_command("a\"b\nc");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-e");
+        assert_eq!(
+            args[1],
+            "display notification \"a\\\"b\\nc\" with title \"herdr-pet\""
+        );
     }
 }

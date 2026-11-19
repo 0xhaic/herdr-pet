@@ -45,6 +45,36 @@ pub fn left_button_down() -> bool {
     NSEvent::pressedMouseButtons() & 1 != 0
 }
 
+/// Post a desktop notification through the app's own bundle, so the banner
+/// carries the app icon and name instead of the Script Editor icon that
+/// osascript uses. Returns false when the process has no bundle identity
+/// (a bare `cargo run` binary); the caller then falls back to osascript.
+///
+/// `NSUserNotificationCenter` is deprecated but still functional and is the
+/// only notification API reachable without adding a new crate.
+pub fn send_notification(message: &str) -> bool {
+    notification::send(message)
+}
+
+mod notification {
+    #![allow(deprecated)]
+
+    use objc2_foundation::{NSBundle, NSString, NSUserNotification, NSUserNotificationCenter};
+
+    pub fn send(message: &str) -> bool {
+        if NSBundle::mainBundle().bundleIdentifier().is_none() {
+            return false;
+        }
+        // Called from the winit main thread during a frame tick.
+        let notification = NSUserNotification::new();
+        notification.setTitle(Some(&NSString::from_str("herdr-pet")));
+        notification.setInformativeText(Some(&NSString::from_str(message)));
+        NSUserNotificationCenter::defaultUserNotificationCenter()
+            .deliverNotification(&notification);
+        true
+    }
+}
+
 fn points_to_pixels(x: f64, y: f64, screen_height: f64, scale: f64) -> (f64, f64) {
     (x * scale, (screen_height - y) * scale)
 }

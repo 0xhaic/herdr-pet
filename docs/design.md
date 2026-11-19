@@ -4,7 +4,10 @@
 > 悬停跳动已实现并实机验证；透明合成改为预乘 alpha，浅色背景白边已修复并实机验证。
 > v0.1.2：应用图标与托盘图标已按「探头」方向落地（2026-11）；`.app` 携带 `AppIcon.icns`，
 > 菜单栏使用与应用图标同轮廓的方形 alpha 模板图（圆角底板实心、猫头镂空）。
-> `cargo test`（71 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
+> `cargo test`（74 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿。
+> 2026-11-19 修正 status 事件解码：根 7501 记录在 `data.status` 下；修复后状态变化
+> 会立即驱动动画并在 blocked/done 变化沿发送通知（已用真实 herdr-core 0.1.21 验证）。
+> 通知改为应用内原生发送，横幅图标与 `AppIcon` 统一（无 bundle 身份时回落 osascript）。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
@@ -48,7 +51,7 @@ herdr-core (Unix socket, JSON-RPC)
         ├── pet.rs    宠物加载 / 动画状态机 / 凝视
         ├── render.rs 单张 atlas 纹理 + 全屏 quad
         ├── platform/macos.rs  全局鼠标、拖拽、点击穿透
-        ├── notify.rs  afplay + osascript
+        ├── notify.rs  afplay + 系统通知（osascript 回落）
         └── tray.rs    tray-icon 菜单
 ```
 
@@ -187,14 +190,21 @@ Socket 发现顺序：
 ```json
 {"jsonrpc":"2.0","method":"event","params":{
   "type":"status","terminal":"t20","seq":2099,
-  "data":{"state":"blocked","app":"claude-code","msg":"..."}}}
+  "data":{"records":{},"reported":true,
+          "status":{"state":"blocked","app":"claude-code","msg":"..."}}}}
 ```
 
 `params.type` 至少处理：`created`、`status`、`finished`、`lost`、`removed`、
 `title`、`labels`、`turn`、`missed`。`heartbeat` 忽略。
 
-- `created` 的 `data` 是完整 Terminal；`status` 的 `data` 是 Status 记录；
-  `finished` 的 `data` 含 `exit_code/finished_ms/reason`。
+- `created` 的 `data` 是完整 Terminal；`status` 的 `data` 是更新包，根 7501
+  记录在 `data.status`（`records` 是其它记录）；`finished` 的 `data` 含
+  `exit_code/finished_ms/reason/signal`；`title` 的 `data` 是 `{"title": ...}`；
+  `labels` 的 `data` 是 `{"labels": {...}}`；`removed` 的 `data` 为空对象。
+  `status` 更新包没有 `data.status` 或 `state` 为空时按未知事件忽略，不得用
+  默认空状态覆盖终端现有状态。
+- 协议以 herdr-core 0.1.21 实测为准（2026-11-19，直连 socket 抓包）；
+  其它事件类型（`foreground`、`size`、`doc` 等）忽略。
 - `missed`：直接断开重连，靠新订阅拿新快照；不尝试补事件。
 - 读超时 45 s（服务端每 15 s 心跳）；超时/断开后 2 s 退避重连。
 - 重连期间 UI 保持最后状态；`Disconnected` 只用于日志，不清空宠物状态。
@@ -246,9 +256,14 @@ Socket 发现顺序：
 ### 3.6 `notify.rs` — 提醒
 
 - 声音：`afplay /System/Library/Sounds/{Basso|Glass}.aiff`，子进程即发即忘。
-- 通知：`osascript -e 'display notification "..." with title "herdr-pet"'`。
-- 所有外部文本做 AppleScript 字符串转义（反斜杠、双引号、换行），
-  绝不拼接 shell 命令；参数用数组传递。
+- 通知：在 `.app` 内运行时通过 `platform/macos.rs` 的 `NSUserNotificationCenter`
+  发送，通知身份就是应用本身，横幅显示 `AppIcon` 与 `herdr-pet` 名称，与
+  应用图标统一；首次发送时系统会请求通知权限（一次性）。
+- 无 bundle 身份时（`cargo run` 直接运行裸二进制、或非 macOS）回落到
+  `osascript -e 'display notification "..." with title "herdr-pet"'`；
+  该路径的图标由系统按 Script Editor 显示。
+- osascript 回落路径中所有外部文本做 AppleScript 字符串转义（反斜杠、双引号、
+  换行），绝不拼接 shell 命令；参数用数组传递。
 - `config.notifications = false` 时不发送系统通知，也不播放提醒音效。
 - `config.notification_sound = false` 时只关闭提醒音效，系统通知照常发送。
 

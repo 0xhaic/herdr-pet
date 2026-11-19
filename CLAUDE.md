@@ -64,7 +64,7 @@ src/
   render.rs      wgpu 单纹理 quad、透明合成
   platform/     macOS 窗口交互：全局鼠标、拖拽、点击穿透、托盘
   config.rs      ~/.config/herdr-pet/config.json 读写
-  notify.rs      afplay + osascript 提醒
+  notify.rs      afplay + 系统通知（.app 内原生发送，裸二进制回落 osascript）
   tray.rs        tray-icon 菜单
 ```
 
@@ -92,8 +92,9 @@ src/
   环境下单测；unsafe 只允许出现在 macOS 平台胶水中，并注明原因。
 - **宠物文件视为不可信输入**：spritesheet ≤ 20 MiB；宽 1536、高为 208 的整数倍且 ≥ 9 行；
   `spritesheetPath` 拒绝绝对路径与目录穿越。失败时保留当前宠物，不崩溃。
-- **通知安全**：外部文本（agent 标题等）必须做 AppleScript 字符串转义，
-  命令参数用数组传递，禁止拼接 shell 字符串；不得把用户数据发到外部服务。
+- **通知安全**：`.app` 内用原生通知（图标与 `AppIcon` 统一）；osascript 回落路径中
+  外部文本（agent 标题等）必须做 AppleScript 字符串转义，命令参数用数组传递，
+  禁止拼接 shell 字符串；不得把用户数据发到外部服务。
 - **透明合成固定为 `PostMultiplied` + 预乘 alpha 输出**：wgpu 30 的 Metal
   后端下 `PreMultiplied` 会产生黑底，直通 alpha 会在浅色背景产生白边
   （见 design 3.4），不要改回。

@@ -181,9 +181,10 @@ pub fn parse_event(params: &Value) -> Event {
         "created" => serde_json::from_value(data)
             .map(Event::Created)
             .unwrap_or(Event::Ignored),
-        "status" if !terminal.is_empty() => serde_json::from_value(data)
-            .map(|status| Event::Status { terminal, status })
-            .unwrap_or(Event::Ignored),
+        "status" if !terminal.is_empty() => match parse_status(&data) {
+            Some(status) => Event::Status { terminal, status },
+            None => Event::Ignored,
+        },
         "finished" if !terminal.is_empty() => Event::Finished { terminal },
         "lost" if !terminal.is_empty() => Event::Lost { terminal },
         "removed" if !terminal.is_empty() => Event::Removed { terminal },
@@ -207,6 +208,19 @@ pub fn parse_event(params: &Value) -> Event {
         "missed" => Event::Missed,
         _ => Event::Ignored,
     }
+}
+
+/// A `status` event's `data` wraps the root 7501 record as
+/// `{"records": {...}, "reported": bool, "status": {...}}`. Older payloads
+/// carried the record directly; accept both. A record without a non-empty
+/// `state` is malformed, not an empty-status update.
+fn parse_status(data: &Value) -> Option<StatusRecord> {
+    let record = data.get("status").unwrap_or(data);
+    let status: StatusRecord = serde_json::from_value(record.clone()).ok()?;
+    if status.state.is_empty() {
+        return None;
+    }
+    Some(status)
 }
 
 fn parse_labels(data: &Value) -> Option<BTreeMap<String, String>> {
@@ -587,6 +601,8 @@ mod tests {
                 "data": {"address": "t20", "state": "live", "title": "agent task"}
             }
         });
+        // Captured from herdr-core 0.1.21: the root 7501 record is nested
+        // under `data.status`, alongside `records` and `reported`.
         let status = json!({
             "jsonrpc": "2.0",
             "method": "event",
@@ -594,7 +610,11 @@ mod tests {
                 "type": "status",
                 "terminal": "t20",
                 "seq": 2099,
-                "data": {"state": "blocked", "app": "claude-code", "msg": "permission?"}
+                "data": {
+                    "records": {},
+                    "reported": true,
+                    "status": {"state": "blocked", "app": "claude-code", "msg": "permission?"}
+                }
             }
         });
         let mut table = StatusTable::new();
@@ -603,6 +623,48 @@ mod tests {
         assert_eq!(change.status, AgentStatus::Blocked);
         assert_eq!(change.text, "agent task");
         assert_eq!(table.aggregate().blocked, 1);
+    }
+
+    #[test]
+    fn real_status_wrapper_drives_animation_and_notification() {
+        // Working -> done must update the aggregate (Mood) and produce the
+        // change edge that notify.rs turns into a notification.
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal("t20", "live", Some("working"))]);
+
+        let done = json!({
+            "type": "status",
+            "terminal": "t20",
+            "data": {
+                "records": {},
+                "reported": true,
+                "status": {"state": "done", "app": "claude-code", "msg": ""}
+            }
+        });
+        let change = table.apply_event(parse_event(&done)).unwrap();
+        assert_eq!(change.status, AgentStatus::Done);
+        assert_eq!(change.text, "t20 title");
+        assert_eq!(table.aggregate().status, Some(AgentStatus::Done));
+    }
+
+    #[test]
+    fn malformed_status_payloads_are_ignored() {
+        for data in [
+            json!({"records": {}, "reported": false, "status": null}),
+            json!({"records": {}, "reported": false}),
+            json!({"state": ""}),
+            json!({"status": "not a record"}),
+        ] {
+            let event = json!({
+                "type": "status",
+                "terminal": "t1",
+                "data": data,
+            });
+            assert!(
+                matches!(parse_event(&event), Event::Ignored),
+                "expected Ignored for {event}"
+            );
+        }
     }
 
     #[test]
