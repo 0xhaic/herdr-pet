@@ -42,15 +42,16 @@ jobs:
           file dist/herdr-pet.app/Contents/MacOS/herdr-pet
           codesign -dv dist/herdr-pet.app
 
-      - name: Zip
+      - name: DMG
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          ditto -c -k --keepParent dist/herdr-pet.app "dist/herdr-pet-${version}-macos-arm64.zip"
+          hdiutil create -volname "herdr-pet" -srcfolder dist/herdr-pet.app \
+            -ov -format UDZO "dist/herdr-pet-${version}-macos-arm64.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: herdr-pet-macos-arm64
-          path: dist/*.zip
+          path: dist/*.dmg
 
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -59,8 +60,8 @@ jobs:
         run: |
           tag="$GITHUB_REF_NAME"
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" dist/*.zip --clobber
+            gh release upload "$tag" dist/*.dmg --clobber
           else
-            gh release create "$tag" dist/*.zip --title "$tag" \
-              --notes "macOS arm64 构建，未签名/未公证。首次启动请右键 → 打开，或执行：xattr -dr com.apple.quarantine /Applications/herdr-pet.app"
+            gh release create "$tag" dist/*.dmg --title "$tag" \
+              --notes "macOS arm64 DMG，未签名/未公证。首次启动请右键 → 打开，或执行：xattr -dr com.apple.quarantine /Applications/herdr-pet.app"
           fi

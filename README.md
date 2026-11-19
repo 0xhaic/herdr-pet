@@ -62,10 +62,10 @@ scripts/bundle.sh aarch64-apple-darwin # 指定目标
 
 - 推送 `v*` tag（如 `v0.1.0`）自动触发，或从 Actions 页面手动触发；
 - 先运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
-- 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.zip` 并上传为 artifact；
-- tag 构建会同时创建同名 GitHub Release 并附带该 zip（手动触发只产出 artifact）。
+- 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.dmg` 并上传为 artifact；
+- tag 构建会同时创建同名 GitHub Release 并附带该 dmg（手动触发只产出 artifact）。
 
-下载的 zip 带 quarantine 标记且未公证，首次启动需右键 → 打开，
+下载的 dmg 未签名/未公证，首次启动需右键 → 打开，
 或执行 `xattr -dr com.apple.quarantine /Applications/herdr-pet.app`。
 
 ## 菜单栏
