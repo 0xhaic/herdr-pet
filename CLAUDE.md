@@ -40,6 +40,19 @@ cargo clippy --all-targets -- -D warnings   # 静态检查，交付前必须通�
 
 CLI：`cargo run -- --list-pets`、`cargo run -- --pet <name|path>`。
 
+## 版本与发布
+
+- 版本号唯一来源是 `Cargo.toml` 的 `version`，遵循语义化版本；发布 tag 名固定为
+  `v<version>`（如 `v0.1.0`），必须与 `Cargo.toml` 一致。
+- 发布提交必须在 `main` 上，且先满足「验证门槛」；发布前更新版本号、README 与
+  `docs/design.md` 中的状态说明。
+- 推送 `v<version>` tag 会触发 `.github/workflows/macos-release.yml`：构建
+  `herdr-pet-<version>-macos-arm64.zip`、上传 artifact，并创建同名 GitHub Release。
+- 打 tag 前需明确确认；已推送的 tag 不删除、不移动，也不重写已发布的历史，
+  修复问题后发布新版本。
+- 发布产物是 ad-hoc 签名、未公证的 arm64 `.app`；Release 说明必须保留首次启动的
+  Gatekeeper 提示。
+
 ## 模块布局
 
 ```text
