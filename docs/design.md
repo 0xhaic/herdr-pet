@@ -8,6 +8,9 @@
 > 动画并在 blocked/done 变化沿发送通知；通知改为应用内原生发送，横幅图标与 `AppIcon`
 > 统一（无 bundle 身份时回落 osascript）。`cargo test`（74 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已用真实 herdr-core 0.1.21 实机验证。
+> v0.1.4：透明合成改在 sRGB 编码空间预乘（CPU 预乘 + 非 sRGB atlas/swapchain），
+> 修复浅色背景下残留的宠物白边。`cargo test`（75 项）、`cargo build`、
+> `cargo clippy --all-targets -- -D warnings` 全绿，已实机 A/B 验证。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
