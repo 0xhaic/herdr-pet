@@ -57,14 +57,22 @@ pub fn send_notification(message: &str) -> bool {
 }
 
 /// Show the About dialog for the tray menu. Must run on the main thread;
-/// the modal alert blocks the event loop until dismissed.
+/// the modal alert blocks the event loop until dismissed, and a click
+/// anywhere outside the dialog dismisses it.
 pub fn show_about() {
     about::show();
 }
 
 mod about {
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
     use objc2::{AnyThread, MainThreadMarker};
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSImage, NSWorkspace};
+    use objc2_app_kit::{
+        NSAlert, NSAlertFirstButtonReturn, NSApplication, NSEvent, NSEventMask, NSImage,
+        NSWorkspace,
+    };
     use objc2_foundation::{NSData, NSString, NSURL};
 
     const REPOSITORY: &str = "github.com/0xhaic/herdr-pet";
@@ -94,7 +102,46 @@ mod about {
         }
         alert.addButtonWithTitle(&NSString::from_str("打开仓库"));
         alert.addButtonWithTitle(&NSString::from_str("关闭"));
-        if alert.runModal() == NSAlertFirstButtonReturn
+
+        // Dismiss on any click outside the dialog. Clicks delivered to other
+        // applications (desktop, other windows) only reach a global monitor;
+        // clicks on our own windows (pet, menu bar) only reach a local one,
+        // so both are installed for the modal session.
+        let outside_click =
+            NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
+        let dialog = alert.window();
+        let local_dialog = dialog.clone();
+        let local_handler: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent> =
+            RcBlock::new(move |event: NonNull<NSEvent>| {
+                // SAFETY: AppKit passes a live event for the duration of the handler.
+                let event_ref = unsafe { event.as_ref() };
+                let inside_dialog = event_ref.window(mtm).is_some_and(|window| {
+                    std::ptr::eq(Retained::as_ptr(&window), Retained::as_ptr(&local_dialog))
+                });
+                if inside_dialog {
+                    event.as_ptr()
+                } else {
+                    NSApplication::sharedApplication(mtm).abortModal();
+                    std::ptr::null_mut()
+                }
+            });
+        // SAFETY: the handler returns `event` unchanged or null.
+        let local = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(outside_click, &local_handler)
+        };
+        let global_handler: RcBlock<dyn Fn(NonNull<NSEvent>)> =
+            RcBlock::new(move |_event: NonNull<NSEvent>| {
+                NSApplication::sharedApplication(mtm).abortModal();
+            });
+        let global =
+            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(outside_click, &global_handler);
+
+        let response = alert.runModal();
+        for monitor in [local, global].into_iter().flatten() {
+            // SAFETY: each token came from the matching add call above.
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+        if response == NSAlertFirstButtonReturn
             && let Some(url) =
                 NSURL::URLWithString(&NSString::from_str(&format!("https://{REPOSITORY}")))
         {

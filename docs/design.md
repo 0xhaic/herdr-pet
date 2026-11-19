@@ -289,6 +289,10 @@ Socket 发现顺序：
 - 「关于」用原生 `NSAlert` 显示简介、编译期版本号（`CARGO_PKG_VERSION`，唯一来源是
   `Cargo.toml`）与仓库链接；「打开仓库」用 `NSWorkspace` 打开
   `https://github.com/0xhaic/herdr-pet`。模态期间事件循环暂停（用户主动操作，可接受）。
+- 点击对话框外的任意位置即关闭对话框：模态期间注册本地 + 全局 `mouseDown` 监听，
+  点击落在对话框窗口内则放行，落在其他位置（其他应用、桌面、宠物窗口、菜单栏）则
+  `abortModal()`，随后移除监听。其他应用的点击只有全局监听可见，本应用的点击
+  （宠物窗口、菜单栏）只有本地监听可见，因此两者都需要。
 - 菜单事件在每帧 tick 中非阻塞 `try_recv`。
 - 若 tray-icon 与 winit 集成失败：降级为"无托盘 + 键盘快捷键退出"，
   并在 `docs/design.md` 记录；不引入第二套 GUI 框架。

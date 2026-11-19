@@ -19,6 +19,7 @@ wgpu = "30.0.2"
 winit = "0.30.13"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "0.6.2", features = ["alloc"] }
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSAlert",
@@ -31,6 +32,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSView",
     "NSWindow",
     "NSWorkspace",
+    "block2",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSBundle",
