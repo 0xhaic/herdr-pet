@@ -11,6 +11,9 @@
 > v0.1.4：透明合成改在 sRGB 编码空间预乘（CPU 预乘 + 非 sRGB atlas/swapchain），
 > 修复浅色背景下残留的宠物白边。`cargo test`（75 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已实机 A/B 验证。
+> v0.1.5：新增托盘「关于」菜单（原生 NSAlert：应用 logo、编译期版本号与仓库链接），
+> 仓库采用 MIT 协议。`cargo test`（75 项）、`cargo build`、
+> `cargo clippy --all-targets -- -D warnings` 全绿，已打包 `.app` 实机验证对话框。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
