@@ -2,6 +2,7 @@
 name = "herdr-pet"
 version = "0.1.4"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -20,13 +21,20 @@ winit = "0.30.13"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
     "NSEvent",
+    "NSImage",
     "NSResponder",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSBundle",
+    "NSData",
     "NSString",
     "NSUserNotification",
 ] }

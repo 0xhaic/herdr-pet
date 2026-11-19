@@ -13,6 +13,7 @@ const ID_SMALLER: &str = "smaller";
 const ID_CLICK_THROUGH: &str = "click-through";
 const ID_NOTIFICATIONS: &str = "notifications";
 const ID_NOTIFICATION_SOUND: &str = "notification-sound";
+const ID_ABOUT: &str = "about";
 const ID_QUIT: &str = "quit";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub enum Action {
     ToggleClickThrough,
     ToggleNotifications,
     ToggleNotificationSound,
+    About,
     Quit,
 }
 
@@ -51,6 +53,7 @@ impl Tray {
             notification_sound,
             None,
         );
+        let about = MenuItem::with_id(ID_ABOUT, "关于", true, None);
         let quit = MenuItem::with_id(ID_QUIT, "退出", true, None);
         let separator_a = PredefinedMenuItem::separator();
         let separator_b = PredefinedMenuItem::separator();
@@ -66,6 +69,7 @@ impl Tray {
             &notifications_item,
             &notification_sound_item,
             &separator_b,
+            &about,
             &quit,
         ])
         .context("building the tray menu")?;
@@ -123,6 +127,7 @@ fn action_for(id: &str) -> Option<Action> {
         ID_CLICK_THROUGH => Some(Action::ToggleClickThrough),
         ID_NOTIFICATIONS => Some(Action::ToggleNotifications),
         ID_NOTIFICATION_SOUND => Some(Action::ToggleNotificationSound),
+        ID_ABOUT => Some(Action::About),
         ID_QUIT => Some(Action::Quit),
         _ => None,
     }
@@ -158,6 +163,7 @@ mod tests {
             action_for("notification-sound"),
             Some(Action::ToggleNotificationSound)
         );
+        assert_eq!(action_for("about"), Some(Action::About));
         assert_eq!(action_for("quit"), Some(Action::Quit));
         assert_eq!(action_for("nope"), None);
     }

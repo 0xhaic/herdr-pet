@@ -87,6 +87,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | 点击穿透 | 整窗鼠标穿透；开启后宠物完全不接收鼠标、不能拖拽，只能从托盘关闭 |
 | 提醒 | 系统通知与提醒音效的总开关 |
 | 通知音效 | 只关闭提醒音效，系统通知照常发送 |
+| 关于 | 显示版本号与仓库链接，可打开 GitHub 仓库 |
 | 退出 | 保存配置并退出 |
 
 托盘图标是与应用图标同轮廓的方形模板图（`assets/tray-icon.png`，22 pt @2x，源文件
@@ -167,3 +168,7 @@ cargo clippy --all-targets -- -D warnings   # 交付前必须全绿
 
 协议、状态优先级、动画时长与里程碑以 [`docs/design.md`](docs/design.md) 为准；
 模块划分与实现约束见 [`CLAUDE.md`](CLAUDE.md)。
+
+## 开源协议
+
+[MIT](LICENSE) © 2026 0xhaic

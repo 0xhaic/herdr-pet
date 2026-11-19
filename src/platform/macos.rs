@@ -56,6 +56,53 @@ pub fn send_notification(message: &str) -> bool {
     notification::send(message)
 }
 
+/// Show the About dialog for the tray menu. Must run on the main thread;
+/// the modal alert blocks the event loop until dismissed.
+pub fn show_about() {
+    about::show();
+}
+
+mod about {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSImage, NSWorkspace};
+    use objc2_foundation::{NSData, NSString, NSURL};
+
+    const REPOSITORY: &str = "github.com/0xhaic/herdr-pet";
+    /// Same artwork as `packaging/AppIcon.icns`; embedded so the logo also
+    /// shows when running the bare binary.
+    const ICON_BYTES: &[u8] = include_bytes!("../../assets/app-icon.png");
+
+    pub fn show() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        // The app runs as an Accessory without a Dock icon, so it may not be
+        // frontmost when the menu item is clicked.
+        NSApplication::sharedApplication(mtm).activate();
+        let body = format!(
+            "由 herdr-core 中 agent 状态驱动的 macOS 桌面宠物。\n\n版本 {}\n{REPOSITORY}",
+            env!("CARGO_PKG_VERSION")
+        );
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("herdr-pet"));
+        alert.setInformativeText(&NSString::from_str(&body));
+        if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(ICON_BYTES))
+        {
+            // SAFETY: the alert retains the image; `Some` is the supported
+            // custom-icon case.
+            unsafe { alert.setIcon(Some(&icon)) };
+        }
+        alert.addButtonWithTitle(&NSString::from_str("打开仓库"));
+        alert.addButtonWithTitle(&NSString::from_str("关闭"));
+        if alert.runModal() == NSAlertFirstButtonReturn
+            && let Some(url) =
+                NSURL::URLWithString(&NSString::from_str(&format!("https://{REPOSITORY}")))
+        {
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
+    }
+}
+
 mod notification {
     #![allow(deprecated)]
 

@@ -3,7 +3,9 @@
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{float_on_all_spaces, left_button_down, mouse_position, send_notification};
+pub use macos::{
+    float_on_all_spaces, left_button_down, mouse_position, send_notification, show_about,
+};
 
 #[cfg(not(target_os = "macos"))]
 pub fn float_on_all_spaces(_window: &winit::window::Window) -> bool {
@@ -24,3 +26,6 @@ pub fn left_button_down() -> bool {
 pub fn send_notification(_message: &str) -> bool {
     false
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn show_about() {}

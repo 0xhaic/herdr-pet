@@ -480,6 +480,7 @@ impl App {
                     }
                     self.save_config();
                 }
+                Action::About => platform::show_about(),
                 Action::Quit => {
                     self.save_config();
                     event_loop.exit();
