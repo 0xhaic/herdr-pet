@@ -213,15 +213,19 @@ Socket 发现顺序：
 
 ### 3.4 `render.rs` — wgpu 渲染
 
-- 一张 atlas 纹理（RGBA，sRGB），一个 quad，uniform 只含 UV 矩形。
-- 片元着色器输出预乘 alpha 的 RGBA（采样后 `rgb * a`）；quad 覆盖整个窗口，
-  混合用 `REPLACE`；clear 为全透明。
+- 一张 atlas 纹理（RGBA，非 sRGB），一个 quad，uniform 只含 UV 矩形。
+- 窗口服务器把非不透明 CAMetalLayer 当作 **sRGB 编码空间中的预乘 alpha**
+  合成。因此 atlas 在上传前按 `rgb' = round(rgb * a)` 在编码空间预乘，
+  纹理用 `Rgba8Unorm`；surface 选非 sRGB 格式，片元着色器原样输出采样值，
+  quad 覆盖整个窗口，混合用 `REPLACE`；clear 为全透明。不要在 shader 里
+  先做 sRGB 解码再乘 alpha：那会让每个软边缘比正确的预乘值更亮，浅色背景
+  上表现为白边（2026-11-19 实机验证与数值模拟）。
 - `alpha_mode` 用 `PostMultiplied`：wgpu 30 的 Metal 后端仅在
   `PostMultiplied` 时把 CAMetalLayer 设为非不透明；`PreMultiplied` 会得到
-  黑底（2026-11-19 实机验证）。但 Metal / 窗口服务器仍按预乘 alpha 合成
-  （该模式只改 opaque 标记，不会真的乘 alpha），所以着色器必须预乘；
-  直通 alpha 会让宠物边缘在浅色背景上发白（2026-11-19 实机验证）。
-- 采样器线性过滤（非像素风宠物也好看）；纹理坐标 clamp。
+  黑底（2026-11-19 实机验证）。该模式只改 opaque 标记，窗口服务器仍按预乘
+  alpha 合成。
+- 采样器线性过滤（非像素风宠物也好看），过滤发生在预乘后的编码值上，
+  不会从全透明像素里带出边缘杂色；纹理坐标 clamp。
 - 60 fps 连续重绘（首版从简）；后续可优化为"帧变化时才重绘"。
 - 切换宠物时重建纹理与 bind group；失败则保留旧纹理。
 

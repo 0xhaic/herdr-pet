@@ -47,12 +47,12 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // macOS composites the non-opaque CAMetalLayer as premultiplied alpha.
-    // wgpu's `PostMultiplied` only makes the layer non-opaque on Metal; the
-    // window server does not actually multiply RGB by alpha. Keep the atlas
-    // straight, but premultiply here or every soft edge glows white.
-    let texel = textureSample(atlas, atlas_sampler, in.uv);
-    return vec4<f32>(texel.rgb * texel.a, texel.a);
+    // macOS composites the non-opaque CAMetalLayer as premultiplied alpha in
+    // the layer's sRGB encoding. The atlas texture already holds
+    // gamma-space premultiplied values and the swapchain is non-sRGB, so
+    // nothing here may decode or re-encode them: premultiplying after an
+    // sRGB decode would brighten every soft edge into a white halo.
+    return textureSample(atlas, atlas_sampler, in.uv);
 }
 "#;
 
@@ -91,17 +91,21 @@ impl Renderer {
             .context("creating wgpu device")?;
 
         let capabilities = surface.get_capabilities(&adapter);
+        // Composite output is premultiplied alpha in the layer's sRGB
+        // encoding (see the fragment shader). A non-sRGB swapchain passes
+        // those values through untouched; an sRGB one would run them through
+        // the hardware encode a second time and brighten soft edges.
         let format = capabilities
             .formats
             .iter()
             .copied()
-            .find(|format| format.is_srgb())
+            .find(|format| !format.is_srgb())
             .or_else(|| capabilities.formats.first().copied())
             .context("surface reports no texture formats")?;
         // wgpu 30's Metal backend only makes CAMetalLayer non-opaque for
         // PostMultiplied; PreMultiplied leaves the layer opaque (black
         // window). The layer is still composited as premultiplied alpha,
-        // so the shader premultiplies its output.
+        // which is what the shader writes.
         let alpha_mode = if capabilities
             .alpha_modes
             .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
@@ -347,6 +351,12 @@ fn create_atlas_texture(
     queue: &wgpu::Queue,
     atlas: &Atlas,
 ) -> wgpu::Texture {
+    // Premultiply in sRGB-encoded space: that is the form the window server
+    // expects from a non-opaque CAMetalLayer, and premultiplying before
+    // sampling keeps linear filtering from pulling fringe colors out of
+    // transparent texels.
+    let mut rgba = atlas.rgba.clone();
+    premultiply_encoded_alpha(&mut rgba);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pet atlas"),
         size: wgpu::Extent3d {
@@ -357,7 +367,9 @@ fn create_atlas_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        // Non-sRGB: the data is already encoded, and the shader passes it
+        // straight to the non-sRGB swapchain.
+        format: wgpu::TextureFormat::Rgba8Unorm,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -368,7 +380,7 @@ fn create_atlas_texture(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &atlas.rgba,
+        &rgba,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(atlas.width * 4),
@@ -381,4 +393,31 @@ fn create_atlas_texture(
         },
     );
     texture
+}
+
+/// Multiply RGB by alpha in place, in the same 8-bit sRGB encoding the
+/// values are stored in.
+fn premultiply_encoded_alpha(rgba: &mut [u8]) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let alpha = u16::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::premultiply_encoded_alpha;
+
+    #[test]
+    fn premultiplies_rgb_in_encoded_space() {
+        let mut rgba = [
+            200, 100, 50, 128, // 50% alpha
+            255, 255, 255, 255, // opaque stays untouched
+            9, 9, 9, 0, // fully transparent loses its color
+        ];
+        premultiply_encoded_alpha(&mut rgba);
+        assert_eq!(rgba, [100, 50, 25, 128, 255, 255, 255, 255, 0, 0, 0, 0]);
+    }
 }
