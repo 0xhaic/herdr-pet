@@ -10,3 +10,6 @@
 
 # Local (machine-specific) Claude Code settings
 .claude/settings.local.json
+
+# Local design reference (not distributed with the repository)
+/design/

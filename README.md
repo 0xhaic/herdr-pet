@@ -65,7 +65,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 应用图标采用「探头」方向（`assets/app-icon.svg` → `packaging/AppIcon.icns`，1024 px，
 824 px 圆角底板）。应用以 `LSUIElement` 运行，不在 Dock 显示；图标用于 Finder、DMG 与通知。
-设计探索稿见 `design/logo-preview.html`（不参与打包）。
+设计探索稿保留在本地 `design/logo-preview.html`（不随仓库分发，不参与打包）。
 
 推送到 GitHub 后，`.github/workflows/macos-release.yml` 可在 CI 中打包：
 
