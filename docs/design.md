@@ -19,6 +19,10 @@
 > （离开凝视回坐姿，不重播 jumping）。`cargo test`（79 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已用假 herdr + 安装后的
 > release 二进制实机验证。
+> v0.1.7：done 坐姿的凝视改为限时窗口——进入 done 后前 30 秒只坐姿，随后开放
+> 60 秒凝视窗口（第 30–90 秒），窗口结束回到 idle 坐姿；计时按聚合状态连续保持
+> done 计算，Done 中断会重置。`cargo test`（80 项）、`cargo build`、
+> `cargo clippy --all-targets -- -D warnings` 全绿，已重新打包覆盖安装。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
@@ -130,11 +134,11 @@ idle 时长取自 herdr-pet `src/sprites.rs`。后续若与真实 Codex 行为�
 ```text
 Mood::Working  -> running（循环）
 Mood::Blocked  -> waving（一次） -> waiting（循环）
-Mood::Done     -> jumping（一次） -> idle（循环）；跳跃结束后坐姿可凝视
+Mood::Done     -> jumping（一次）-> 坐姿；连续 done 30 秒后开放 60 秒凝视窗口
 Mood::Failed   -> failed（循环）
 Mood::Idle     -> idle（循环）-> 长待机随机 waving / jumping（一次）-> idle
 拖动中         -> running-right / running-left（覆盖 Mood）
-Idle / Done 坐姿 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
+Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
 鼠标悬停       -> jumping ×3 -> idle（覆盖除拖拽外的状态）
 ```
 
@@ -148,8 +152,12 @@ Idle / Done 坐姿 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
   （Done 坐姿的凝视例外：返回坐姿，不重播 jumping）。
 - 凝视：`angle = atan2(dx, -dy)`，0° 向上，顺时针每 22.5° 一格，共 16 格；
   距离小于死区（24 logical px）回落到 idle。鼠标在宠物正上方时 `000`。
-  Done 的 jumping 播放结束后进入坐姿，凝视覆盖该坐姿；凝视结束回到坐姿并重置
-  idle 计时，不重播 jumping；jumping 入场本身不会被凝视打断。
+  Done 的 jumping 播放结束后进入坐姿；从首次观察到聚合状态连续为 Done 起，
+  前 30 秒不响应凝视，之后开放 60 秒凝视窗口（第 30–90 秒）。窗口内凝视结束
+  回到坐姿并重置 idle 计时，不重播 jumping；窗口在第 90 秒关闭时，即使鼠标仍在
+  凝视区也回到 idle 坐姿，且本次 Done 不再凝视；jumping 入场本身不会被凝视打断。
+  计时只随聚合状态是否连续为 Done 推进：拖拽、悬停不会暂停或重置；聚合状态离开
+  Done 后再次进入时，重新从 30 秒延迟开始。
 - 悬停：与 Codex 宠物组件的 `respondToHover` 一致。鼠标进入宠物窗口矩形即悬停，
   播放 jumping 3 次后进入 idle 坐姿循环；悬停期间覆盖除拖拽外的状态并暂停凝视，
   移出后恢复当前 Mood（重置 idle 计时）。
@@ -157,8 +165,8 @@ Idle / Done 坐姿 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
   jumping 播完回到 idle 坐姿，保留变化沿提醒但不阻塞默认坐姿。
 - 测试锚点：`frame_index` 边界、waving→waiting、jumping→idle、idle 随机动作的
   阈值/选择/回退/打断与重置、悬停 jumping×3→idle、悬停覆盖凝视、拖拽优先、
-  Done 坐姿凝视、jumping 不被凝视跳过、离开凝视回坐姿、8 个基本方向、16 格取整、
-  死区、无凝视行时回落 idle。
+  Done 凝视的 30 秒延迟、60 秒窗口开闭与 Done 中断重置、jumping 不被凝视跳过、
+  离开凝视回坐姿、8 个基本方向、16 格取整、死区、无凝视行时回落 idle。
 
 ### 3.2 `status.rs` — agent 状态表与聚合（纯逻辑，可单测）
 

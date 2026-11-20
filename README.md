@@ -12,8 +12,9 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后回到坐姿、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
 - **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
-- **鼠标凝视**：空闲（含 done 跳跃结束后的坐姿）且未悬停时宠物看向鼠标方向
-  （16 个方向，需素材包含 look 行）。
+- **鼠标凝视**：空闲时、以及 done 连续保持 30–90 秒的凝视窗口内（未悬停）宠物看向
+  鼠标方向（16 个方向，需素材包含 look 行）；done 窗口结束后回到 idle 坐姿。
+  done 前 30 秒与窗口结束后不响应凝视。
 - **提醒**：agent 进入 blocked / done 时弹系统通知并播放提示音（Basso / Glass）；
   是否提醒与是否播放音效可分别开关，同一帧内的多条提醒会合并。
 - **菜单栏控制**：显示/隐藏、切换宠物、缩放、点击穿透、提醒开关、通知音效、退出。
@@ -70,7 +71,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 推送到 GitHub 后，`.github/workflows/macos-release.yml` 可在 CI 中打包：
 
-- 推送 `v*` tag（如 `v0.1.6`）自动触发，或从 Actions 页面手动触发；
+- 推送 `v*` tag（如 `v0.1.7`）自动触发，或从 Actions 页面手动触发；
 - 先运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
 - 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.dmg` 并上传为 artifact；
 - tag 构建会同时创建同名 GitHub Release 并附带该 dmg（手动触发只产出 artifact）。
@@ -121,7 +122,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | `position` | `null` | 窗口位置（物理像素，左上角原点）；启动时若在所有屏幕之外则回落到默认位置 |
 | `notifications` | `true` | 是否发送系统通知 |
 | `notification_sound` | `true` | 是否播放提醒音效 |
-| `gaze` | `true` | 空闲凝视开关（素材无 look 行时自动禁用） |
+| `gaze` | `true` | 凝视开关（idle 与 done 凝视窗口；素材无 look 行时自动禁用） |
 | `click_through` | `false` | 整窗点击穿透；开启后宠物不可拖拽 |
 
 ## 状态与动画
@@ -130,12 +131,12 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | --- | --- |
 | working | running（循环） |
 | blocked | waving 一次 → waiting（循环） |
-| done | jumping 一次 → idle（坐姿循环，可凝视） |
+| done | jumping 一次 → 坐姿；连续 done 30 秒后开放 60 秒凝视窗口，窗口结束回 idle 坐姿 |
 | error | failed（循环） |
 | idle | idle（循环）；连续 idle 15–30 秒随机 waving / jumping 一次后回到 idle |
 | 拖动中 | running-left / running-right |
 | 鼠标悬停 | jumping ×3 → idle；覆盖除拖拽外的状态 |
-| idle / done 坐姿 + 鼠标 | look 行 9/10，按 16 方向选列 |
+| idle / done 30–90 秒 + 鼠标 | look 行 9/10，按 16 方向选列 |
 
 提醒只在状态**变化沿**触发：进入 blocked 或 done 时提醒，初始快照不提醒；
 拖拽、凝视或悬停会打断 idle 计时与随机动作。

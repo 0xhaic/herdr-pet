@@ -20,6 +20,13 @@ pub const MAX_SPRITESHEET_BYTES: u64 = 20 * 1024 * 1024;
 /// Gaze dead zone in logical pixels. Closer than this falls back to idle.
 pub const GAZE_DEAD_ZONE: f32 = 24.0;
 
+/// Done sits without responding to the mouse for this long after the aggregate
+/// status first reports Done.
+const DONE_GAZE_DELAY_MS: u64 = 30_000;
+/// Gaze stays available for this long after the delay, then Done settles back
+/// into the idle sitting pose.
+const DONE_GAZE_WINDOW_MS: u64 = 60_000;
+
 /// Closest possible delay between ambient idle actions, in milliseconds.
 const IDLE_ACTION_MIN_MS: u64 = 15_000;
 const IDLE_ACTION_RANGE_MS: u64 = 15_001;
@@ -432,6 +439,9 @@ pub struct Animator {
     next_idle_action_ms: u64,
     /// Set once Done's one-shot jump has handed over to the sitting pose.
     done_gaze_ready: bool,
+    /// First tick that observed a continuous Done; anchors the gaze delay and
+    /// window. Cleared as soon as another mood is observed.
+    done_since_ms: Option<u64>,
 }
 
 impl Animator {
@@ -453,6 +463,7 @@ impl Animator {
             random: Random(seed),
             next_idle_action_ms: 0,
             done_gaze_ready: false,
+            done_since_ms: None,
         };
         animator.schedule_idle_action(0);
         animator
@@ -487,21 +498,36 @@ impl Animator {
     }
 
     /// Look rows are available while Idle and, once the one-shot jump has
-    /// finished, while Done is sitting.
-    fn can_look(&self, mood: Mood) -> bool {
-        self.look_enabled
-            && (mood == Mood::Idle
-                || (mood == Mood::Done && self.mood == Mood::Done && self.done_gaze_ready))
+    /// finished, during the 60 s window that opens 30 s after Done began.
+    fn can_look(&self, mood: Mood, now_ms: u64) -> bool {
+        if !self.look_enabled {
+            return false;
+        }
+        match mood {
+            Mood::Idle => true,
+            Mood::Done => {
+                self.mood == Mood::Done
+                    && self.done_gaze_ready
+                    && self.done_since_ms.is_some_and(|since| {
+                        (DONE_GAZE_DELAY_MS..DONE_GAZE_DELAY_MS + DONE_GAZE_WINDOW_MS)
+                            .contains(&now_ms.saturating_sub(since))
+                    })
+            }
+            _ => false,
+        }
     }
 
     pub fn update(&mut self, now_ms: u64, input: AnimInput) -> Frame {
-        if input.mood != Mood::Done {
+        if input.mood == Mood::Done {
+            self.done_since_ms.get_or_insert(now_ms);
+        } else {
+            self.done_since_ms = None;
             self.done_gaze_ready = false;
         }
         let active = match (input.dragging, input.hover, input.gaze) {
             (Some(dir), _, _) => Active::Drag(dir),
             (None, true, _) => Active::Hover,
-            (None, false, Some(_)) if self.can_look(input.mood) => Active::Look,
+            (None, false, Some(_)) if self.can_look(input.mood, now_ms) => Active::Look,
             _ => Active::Base,
         };
 
@@ -991,38 +1017,58 @@ mod tests {
     }
 
     #[test]
-    fn done_sitting_follows_gaze_after_jumping() {
+    fn done_gaze_opens_after_thirty_seconds_and_closes_after_one_minute() {
         let mut animator = Animator::with_seed(true, 0);
         let cell = gaze_cell(100.0, 0.0).unwrap();
 
-        // The one-shot jump still plays in full even with a gaze target.
+        // The one-shot jump plays, then the sitting pose ignores the mouse for
+        // the first 30 seconds.
         assert_eq!(
             animator.update(0, input(Mood::Done, None, Some(cell))),
             Frame { row: 4, col: 0 }
-        );
-        assert_eq!(
-            animator.update(839, input(Mood::Done, None, Some(cell))),
-            Frame { row: 4, col: 4 }
         );
         assert_eq!(
             animator.update(840, input(Mood::Done, None, Some(cell))),
             Frame { row: 0, col: 0 }
         );
         assert_eq!(
-            animator.update(856, input(Mood::Done, None, Some(cell))),
+            animator.update(29_999, input(Mood::Done, None, Some(cell))),
+            Frame {
+                row: 0,
+                col: frame_index(Action::Idle, 29_159, false) as u32
+            }
+        );
+
+        // The 60-second gaze window opens at 30 s.
+        assert_eq!(
+            animator.update(30_000, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+        // Leaving and re-entering inside the window is allowed.
+        assert_eq!(
+            animator.update(31_000, input(Mood::Done, None, None)),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(32_000, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+        assert_eq!(
+            animator.update(89_999, input(Mood::Done, None, Some(cell))),
             Frame { row: 9, col: 4 }
         );
 
-        // Leaving the gaze returns to the sitting pose, not a second jump.
+        // At 90 s the window closes and the pet sits, still ignoring the mouse.
         assert_eq!(
-            animator.update(1000, input(Mood::Done, None, None)),
+            animator.update(90_000, input(Mood::Done, None, Some(cell))),
             Frame { row: 0, col: 0 }
         );
-        assert!(animator.next_idle_action_ms >= 16_000);
-        assert!(animator.next_idle_action_ms <= 31_000);
         assert_eq!(
-            animator.update(1100, input(Mood::Done, None, Some(cell))),
-            Frame { row: 9, col: 4 }
+            animator.update(93_000, input(Mood::Done, None, Some(cell))),
+            Frame {
+                row: 0,
+                col: frame_index(Action::Idle, 3_000, false) as u32
+            }
         );
     }
 
@@ -1031,6 +1077,7 @@ mod tests {
         let mut animator = Animator::with_seed(true, 0);
         let cell = gaze_cell(100.0, 0.0).unwrap();
 
+        // Idle gaze is active when Done arrives; the jump still plays in full.
         assert_eq!(
             animator.update(0, input(Mood::Idle, None, Some(cell))),
             Frame { row: 9, col: 4 }
@@ -1040,35 +1087,96 @@ mod tests {
             Frame { row: 4, col: 0 }
         );
         assert_eq!(
-            animator.update(840, input(Mood::Done, None, Some(cell))),
-            Frame { row: 4, col: 4 }
-        );
-        assert_eq!(
             animator.update(856, input(Mood::Done, None, Some(cell))),
             Frame { row: 0, col: 0 }
         );
+        // The window is anchored to the first Done observation (16 ms).
         assert_eq!(
-            animator.update(872, input(Mood::Done, None, Some(cell))),
+            animator.update(30_015, input(Mood::Done, None, Some(cell))),
+            Frame {
+                row: 0,
+                col: frame_index(Action::Idle, 30_015 - 856, false) as u32
+            }
+        );
+        assert_eq!(
+            animator.update(30_016, input(Mood::Done, None, Some(cell))),
             Frame { row: 9, col: 4 }
         );
     }
 
     #[test]
-    fn new_done_while_gazing_replays_jumping() {
+    fn new_done_while_gazing_replays_jumping_and_restarts_the_window() {
         let mut animator = Animator::with_seed(true, 0);
         let cell = gaze_cell(100.0, 0.0).unwrap();
 
-        animator.update(0, input(Mood::Done, None, Some(cell)));
-        animator.update(840, input(Mood::Done, None, Some(cell)));
         assert_eq!(
-            animator.update(856, input(Mood::Done, None, Some(cell))),
+            animator.update(0, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(30_000, input(Mood::Done, None, Some(cell))),
             Frame { row: 9, col: 4 }
         );
 
-        animator.update(900, input(Mood::Idle, None, Some(cell)));
+        // Done -> Idle keeps gazing; a new Done is a new completion, so the
+        // jump plays again and the 30 s delay restarts.
         assert_eq!(
-            animator.update(916, input(Mood::Done, None, Some(cell))),
+            animator.update(31_000, input(Mood::Idle, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+        assert_eq!(
+            animator.update(31_016, input(Mood::Done, None, Some(cell))),
             Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(31_856, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(61_015, input(Mood::Done, None, Some(cell))),
+            Frame {
+                row: 0,
+                col: frame_index(Action::Idle, 29_159, false) as u32
+            }
+        );
+        assert_eq!(
+            animator.update(61_016, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+    }
+
+    #[test]
+    fn hover_does_not_reset_the_done_gaze_window() {
+        let mut animator = Animator::with_seed(true, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        // Done arrives while the mouse is hovering; the timer starts anyway.
+        assert_eq!(
+            animator.update(0, hover_input(Mood::Done, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        // Leaving hover replays the entry jump once, but the window still
+        // counts from Done's first observation.
+        assert_eq!(
+            animator.update(40_000, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(40_840, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(40_856, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+        // The window still closes 90 s after the first observation.
+        assert_eq!(
+            animator.update(90_000, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
         );
     }
 
