@@ -52,6 +52,9 @@ CLI：`cargo run -- --list-pets`、`cargo run -- --pet <name|path>`。
   修复问题后发布新版本。
 - 发布产物是 ad-hoc 签名、未公证的 arm64 `.app`；Release 说明必须保留首次启动的
   Gatekeeper 提示。
+- 每次发布必须带更新日志：Release 说明需按「新增 / 修复 / 其它」列出本版本的用户
+  可见变更；CI 自动创建的说明只有 Gatekeeper 提示，需在发布后（CI 创建 Release 后）
+  用 `gh release edit v<version>` 补齐。
 
 ## 模块布局
 
@@ -77,8 +80,9 @@ src/
   - 计数按 terminal address；父 agent 与子 agent（`parent` 非空）各算一个，不做父子去重。
   - 动画：working→running，blocked→waving→waiting，done→jumping→idle，
     error→failed，idle→idle，拖动→running-left/right；鼠标悬停覆盖除拖拽外的
-    状态，播放 jumping ×3 后回到 idle；凝视在 idle 及 done 跳跃结束后的坐姿、
-    未悬停时覆盖；离开凝视回到坐姿，不重播 jumping。
+    状态，播放 jumping ×3 后回到 idle；凝视在 idle 及 done 连续保持 30–90 秒的
+    窗口内、未悬停时覆盖（按聚合状态连续 done 计时，Done 中断重置）；离开凝视
+    或窗口结束时回到坐姿，不重播 jumping。
     连续 idle 满 15–30 秒随机播放一次 waving/jumping 后回 idle（本项目增强，
     非 Codex 公开契约）；凝视/拖拽/悬停打断并重置 idle 计时。
   - 初始 snapshot 不提醒；只在进入 blocked/done 的变化沿提醒，同帧合并。
