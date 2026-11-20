@@ -31,7 +31,7 @@ const PET_WIDTH: f64 = PET_HEIGHT * pet::CELL_W as f64 / pet::CELL_H as f64;
 const MIN_PET_HEIGHT: f64 = 52.0;
 const MAX_PET_HEIGHT: f64 = 312.0;
 const EDGE_MARGIN: f64 = 24.0;
-const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const TICK_INTERVAL: Duration = Duration::from_millis(16);
 const HIDDEN_INTERVAL: Duration = Duration::from_millis(250);
 const CLICK_ALPHA: u8 = 16;
 
@@ -205,7 +205,14 @@ struct App {
     animator: Animator,
     messages: Receiver<HerdrMessage>,
     started: Instant,
-    next_frame: Instant,
+    next_tick: Instant,
+    /// UV rect of the frame the next redraw should show.
+    pending_uv: [f32; 4],
+    /// UV rect last handed to the renderer; redraw only when it changes.
+    presented_uv: Option<[f32; 4]>,
+    /// Force the next redraw even if `pending_uv` matches (resize, new atlas,
+    /// re-shown window, or a failed present).
+    force_redraw: bool,
     config: Config,
     dragging: Option<Drag>,
     primary_height: f64,
@@ -219,6 +226,7 @@ impl App {
     fn new(pet: Pet, messages: Receiver<HerdrMessage>, mut config: Config) -> Self {
         config.size = clamp_size(config.size);
         let animator = Animator::new(config.gaze && pet.atlas.gaze_enabled());
+        let pending_uv = pet.atlas.cell_uv(0, 0);
         let pets = pet::pet_dirs().unwrap_or_default();
         let pet_index = pets.iter().position(|dir| dir == &pet.dir).unwrap_or(0);
         Self {
@@ -229,7 +237,10 @@ impl App {
             animator,
             messages,
             started: Instant::now(),
-            next_frame: Instant::now(),
+            next_tick: Instant::now(),
+            pending_uv,
+            presented_uv: None,
+            force_redraw: true,
             config,
             dragging: None,
             primary_height: 0.0,
@@ -401,7 +412,9 @@ impl App {
         let _ = window.set_cursor_hittest(alpha.is_some_and(|alpha| alpha >= CLICK_ALPHA));
     }
 
-    fn redraw(&mut self) {
+    /// Advance input and animation state on every tick, but only ask for a
+    /// redraw when the visible cell actually changes.
+    fn tick(&mut self) {
         self.drain_messages();
         let visible = self
             .window
@@ -428,13 +441,38 @@ impl App {
             },
         );
 
-        if let Some(renderer) = &mut self.renderer {
-            renderer.set_uv(self.pet.atlas.cell_uv(frame.row, frame.col));
-            if let Err(error) = renderer.render() {
-                eprintln!("herdr-pet: render error: {error:#}");
+        self.update_cursor(pointer, frame);
+        let uv = self.pet.atlas.cell_uv(frame.row, frame.col);
+        if self.force_redraw || self.presented_uv != Some(uv) {
+            self.pending_uv = uv;
+            if let Some(window) = &self.window {
+                window.request_redraw();
             }
         }
-        self.update_cursor(pointer, frame);
+    }
+
+    fn present(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if !window.is_visible().unwrap_or(true) {
+            return;
+        }
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        let uv = self.pending_uv;
+        renderer.set_uv(uv);
+        match renderer.render() {
+            Ok(()) => {
+                self.presented_uv = Some(uv);
+                self.force_redraw = false;
+            }
+            Err(error) => {
+                eprintln!("herdr-pet: render error: {error:#}");
+                self.force_redraw = true;
+            }
+        }
     }
 
     fn handle_tray(&mut self, event_loop: &ActiveEventLoop) {
@@ -446,8 +484,10 @@ impl App {
                         window.set_visible(!visible);
                         if visible {
                             let _ = window.set_cursor_hittest(!self.config.click_through);
+                        } else {
+                            self.force_redraw = true;
                         }
-                        self.next_frame = Instant::now();
+                        self.next_tick = Instant::now();
                     }
                 }
                 Action::NextPet => self.next_pet(),
@@ -514,6 +554,9 @@ impl App {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.replace_atlas(&self.pet.atlas);
                     }
+                    self.pending_uv = self.pet.atlas.cell_uv(0, 0);
+                    self.force_redraw = true;
+                    self.next_tick = Instant::now();
                     self.save_config();
                     return;
                 }
@@ -585,9 +628,11 @@ impl ApplicationHandler for App {
             Ok(tray) => self.tray = Some(tray),
             Err(error) => eprintln!("herdr-pet: tray unavailable: {error:#}"),
         }
+        self.pending_uv = self.pet.atlas.cell_uv(0, 0);
+        self.force_redraw = true;
         self.window = Some(window);
-        self.next_frame = Instant::now();
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        self.next_tick = Instant::now();
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick));
     }
 
     fn window_event(
@@ -605,6 +650,8 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                self.force_redraw = true;
+                self.next_tick = Instant::now();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -619,7 +666,7 @@ impl ApplicationHandler for App {
                 self.dragging = None;
                 self.save_config();
             }
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => self.present(),
             _ => {}
         }
     }
@@ -631,16 +678,16 @@ impl ApplicationHandler for App {
             return;
         };
         let interval = if window.is_visible().unwrap_or(true) {
-            FRAME_INTERVAL
+            TICK_INTERVAL
         } else {
             HIDDEN_INTERVAL
         };
         let now = Instant::now();
-        if now >= self.next_frame {
-            self.next_frame = now + interval;
-            window.request_redraw();
+        if now >= self.next_tick {
+            self.next_tick = now + interval;
+            self.tick();
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick));
     }
 }
 
