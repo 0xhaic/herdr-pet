@@ -14,6 +14,11 @@
 > v0.1.5：新增托盘「关于」菜单（原生 NSAlert：应用 logo、编译期版本号与仓库链接），
 > 仓库采用 MIT 协议。`cargo test`（75 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已打包 `.app` 实机验证对话框。
+> v0.1.6：重绘改为仅在可见帧变化时 present（60 Hz tick 只推进状态；窗口隐藏时
+> 250 ms tick 且不渲染）；done 的 jumping 播放结束后，坐姿也支持鼠标凝视
+> （离开凝视回坐姿，不重播 jumping）。`cargo test`（79 项）、`cargo build`、
+> `cargo clippy --all-targets -- -D warnings` 全绿，已用假 herdr + 安装后的
+> release 二进制实机验证。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
