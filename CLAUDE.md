@@ -77,7 +77,8 @@ src/
   - 计数按 terminal address；父 agent 与子 agent（`parent` 非空）各算一个，不做父子去重。
   - 动画：working→running，blocked→waving→waiting，done→jumping→idle，
     error→failed，idle→idle，拖动→running-left/right；鼠标悬停覆盖除拖拽外的
-    状态，播放 jumping ×3 后回到 idle；凝视仅在 idle 且未悬停时覆盖。
+    状态，播放 jumping ×3 后回到 idle；凝视在 idle 及 done 跳跃结束后的坐姿、
+    未悬停时覆盖；离开凝视回到坐姿，不重播 jumping。
     连续 idle 满 15–30 秒随机播放一次 waving/jumping 后回 idle（本项目增强，
     非 Codex 公开契约）；凝视/拖拽/悬停打断并重置 idle 计时。
   - 初始 snapshot 不提醒；只在进入 blocked/done 的变化沿提醒，同帧合并。

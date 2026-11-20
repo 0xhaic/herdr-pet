@@ -125,11 +125,11 @@ idle 时长取自 herdr-pet `src/sprites.rs`。后续若与真实 Codex 行为�
 ```text
 Mood::Working  -> running（循环）
 Mood::Blocked  -> waving（一次） -> waiting（循环）
-Mood::Done     -> jumping（一次） -> idle（循环）
+Mood::Done     -> jumping（一次） -> idle（循环）；跳跃结束后坐姿可凝视
 Mood::Failed   -> failed（循环）
 Mood::Idle     -> idle（循环）-> 长待机随机 waving / jumping（一次）-> idle
 拖动中         -> running-right / running-left（覆盖 Mood）
-Idle + 凝视     -> look row 9/10（覆盖 idle，仅当 atlas 有 11 行）
+Idle / Done 坐姿 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
 鼠标悬停       -> jumping ×3 -> idle（覆盖除拖拽外的状态）
 ```
 
@@ -139,9 +139,12 @@ Idle + 凝视     -> look row 9/10（覆盖 idle，仅当 atlas 有 11 行）
   每段连续 idle 满 15–30 秒后随机选择 waving 或 jumping，播完回到 idle。
   15–30 秒包含两端；随机源用可注入种子的轻量 PRNG，不新增依赖。
   其他 Mood 不用随机动作覆盖，以免遮蔽工作状态。idle 计时只在 Base + Idle 状态下推进；
-  拖拽、凝视或悬停打断当前 idle/随机动作，返回时从头播放当前 Mood 的入场动作并重置 idle 计时。
+  拖拽、凝视或悬停打断当前 idle/随机动作，返回时从头播放当前 Mood 的入场动作并重置 idle 计时
+  （Done 坐姿的凝视例外：返回坐姿，不重播 jumping）。
 - 凝视：`angle = atan2(dx, -dy)`，0° 向上，顺时针每 22.5° 一格，共 16 格；
   距离小于死区（24 logical px）回落到 idle。鼠标在宠物正上方时 `000`。
+  Done 的 jumping 播放结束后进入坐姿，凝视覆盖该坐姿；凝视结束回到坐姿并重置
+  idle 计时，不重播 jumping；jumping 入场本身不会被凝视打断。
 - 悬停：与 Codex 宠物组件的 `respondToHover` 一致。鼠标进入宠物窗口矩形即悬停，
   播放 jumping 3 次后进入 idle 坐姿循环；悬停期间覆盖除拖拽外的状态并暂停凝视，
   移出后恢复当前 Mood（重置 idle 计时）。
@@ -149,7 +152,8 @@ Idle + 凝视     -> look row 9/10（覆盖 idle，仅当 atlas 有 11 行）
   jumping 播完回到 idle 坐姿，保留变化沿提醒但不阻塞默认坐姿。
 - 测试锚点：`frame_index` 边界、waving→waiting、jumping→idle、idle 随机动作的
   阈值/选择/回退/打断与重置、悬停 jumping×3→idle、悬停覆盖凝视、拖拽优先、
-  8 个基本方向、16 格取整、死区、无凝视行时回落 idle。
+  Done 坐姿凝视、jumping 不被凝视跳过、离开凝视回坐姿、8 个基本方向、16 格取整、
+  死区、无凝视行时回落 idle。
 
 ### 3.2 `status.rs` — agent 状态表与聚合（纯逻辑，可单测）
 

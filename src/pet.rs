@@ -430,6 +430,8 @@ pub struct Animator {
     base: Base,
     random: Random,
     next_idle_action_ms: u64,
+    /// Set once Done's one-shot jump has handed over to the sitting pose.
+    done_gaze_ready: bool,
 }
 
 impl Animator {
@@ -450,6 +452,7 @@ impl Animator {
             base: Base::Mood,
             random: Random(seed),
             next_idle_action_ms: 0,
+            done_gaze_ready: false,
         };
         animator.schedule_idle_action(0);
         animator
@@ -473,6 +476,7 @@ impl Animator {
     }
 
     fn enter_mood(&mut self, mood: Mood, now_ms: u64) {
+        self.done_gaze_ready = false;
         self.mood = mood;
         if mood == Mood::Idle {
             self.begin_idle(now_ms);
@@ -482,19 +486,37 @@ impl Animator {
         }
     }
 
+    /// Look rows are available while Idle and, once the one-shot jump has
+    /// finished, while Done is sitting.
+    fn can_look(&self, mood: Mood) -> bool {
+        self.look_enabled
+            && (mood == Mood::Idle
+                || (mood == Mood::Done && self.mood == Mood::Done && self.done_gaze_ready))
+    }
+
     pub fn update(&mut self, now_ms: u64, input: AnimInput) -> Frame {
+        if input.mood != Mood::Done {
+            self.done_gaze_ready = false;
+        }
         let active = match (input.dragging, input.hover, input.gaze) {
             (Some(dir), _, _) => Active::Drag(dir),
             (None, true, _) => Active::Hover,
-            (None, false, Some(_)) if self.look_enabled && input.mood == Mood::Idle => Active::Look,
+            (None, false, Some(_)) if self.can_look(input.mood) => Active::Look,
             _ => Active::Base,
         };
 
         if active != self.active {
+            let leaving_look = self.active == Active::Look;
             self.active = active;
             self.row_started_ms = now_ms;
             if active == Active::Base {
-                self.enter_mood(input.mood, now_ms);
+                if leaving_look && input.mood == Mood::Done && self.done_gaze_ready {
+                    // Done already jumped once; leaving its sitting gaze must
+                    // not replay the one-shot reminder.
+                    self.begin_idle(now_ms);
+                } else {
+                    self.enter_mood(input.mood, now_ms);
+                }
             }
         }
 
@@ -546,6 +568,9 @@ impl Animator {
                     if now_ms.saturating_sub(self.row_started_ms) >= total {
                         self.action = next;
                         self.row_started_ms += total;
+                        if self.mood == Mood::Done && next == Action::Idle {
+                            self.done_gaze_ready = true;
+                        }
                     }
                 }
                 if self.mood == Mood::Idle
@@ -962,6 +987,107 @@ mod tests {
         assert_eq!(
             animator.update(2520, input(Mood::Done, None, None)),
             Frame { row: 0, col: 1 }
+        );
+    }
+
+    #[test]
+    fn done_sitting_follows_gaze_after_jumping() {
+        let mut animator = Animator::with_seed(true, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        // The one-shot jump still plays in full even with a gaze target.
+        assert_eq!(
+            animator.update(0, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(839, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 4 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(856, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+
+        // Leaving the gaze returns to the sitting pose, not a second jump.
+        assert_eq!(
+            animator.update(1000, input(Mood::Done, None, None)),
+            Frame { row: 0, col: 0 }
+        );
+        assert!(animator.next_idle_action_ms >= 16_000);
+        assert!(animator.next_idle_action_ms <= 31_000);
+        assert_eq!(
+            animator.update(1100, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+    }
+
+    #[test]
+    fn done_entry_is_not_skipped_by_gaze() {
+        let mut animator = Animator::with_seed(true, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        assert_eq!(
+            animator.update(0, input(Mood::Idle, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+        assert_eq!(
+            animator.update(16, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 4 }
+        );
+        assert_eq!(
+            animator.update(856, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(872, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+    }
+
+    #[test]
+    fn new_done_while_gazing_replays_jumping() {
+        let mut animator = Animator::with_seed(true, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        animator.update(0, input(Mood::Done, None, Some(cell)));
+        animator.update(840, input(Mood::Done, None, Some(cell)));
+        assert_eq!(
+            animator.update(856, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+
+        animator.update(900, input(Mood::Idle, None, Some(cell)));
+        assert_eq!(
+            animator.update(916, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+    }
+
+    #[test]
+    fn done_without_look_rows_stays_sitting() {
+        let mut animator = Animator::with_seed(false, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        assert_eq!(
+            animator.update(0, input(Mood::Done, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(900, input(Mood::Done, None, Some(cell))),
+            Frame { row: 0, col: 0 }
         );
     }
 
