@@ -15,6 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 必须在任何 cargo 命令之前读取：cargo 会自动改写 Cargo.lock 的版本。
+      - name: Check version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          manifest_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          lock_version=$(sed -n '/^name = "herdr-pet"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$tag_version" != "$manifest_version" ] || [ "$manifest_version" != "$lock_version" ]; then
+            echo "version mismatch: tag=$GITHUB_REF_NAME Cargo.toml=$manifest_version Cargo.lock=$lock_version" >&2
+            exit 1
+          fi
+
       - name: Add arm64 target
         run: rustup target add aarch64-apple-darwin
 
