@@ -23,10 +23,10 @@
 > 60 秒凝视窗口（第 30–90 秒），窗口结束回到 idle 坐姿；计时按聚合状态连续保持
 > done 计算，Done 中断会重置。`cargo test`（80 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已重新打包覆盖安装。
-> 本地新增（未发版，2026-11-22）：宠物上方两行毛玻璃聊天框与右下角收起按钮；
-> 仅当 Herdr 不在前台（或未启动）且存在 blocked/working/error 或未读 done agent
-> 时显示，点击气泡或宠物拉起 Herdr 并跳到会话（见 3.10/3.11）。气泡内容按
-> blocked/error → 未读 done → 最近状态变化的 working → 其它排序。`cargo test`
+> v0.1.9：新增宠物上方两行毛玻璃聊天框与右下角收放按钮；仅当 Herdr 不在前台
+> （或未启动）且存在 blocked/working/error 或未读 done 时显示；气泡内容按
+> blocked/error → 未读 done → 最近状态变化的 working → 其它排序；未读 done
+> 查看后消失；点击气泡或宠物拉起 Herdr 并跳转（见 3.10/3.11）。`cargo test`
 > （96 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿，
 > 已实机验证毛玻璃、实时文案、展开/收起、前台隐藏、error 保留、done 未读保留/
 > 已读消失、点击跳转、拖动不跳转与位置持久化。
