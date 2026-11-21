@@ -4,9 +4,16 @@
 //! the primary screen. We convert to top-left-origin physical pixels so the
 //! rest of the app can compare it with winit window positions.
 
-use objc2_app_kit::{NSEvent, NSView, NSWindowCollectionBehavior};
+use std::path::PathBuf;
+
+use objc2_app_kit::{NSEvent, NSView, NSWindowCollectionBehavior, NSWorkspace};
+use objc2_foundation::NSString;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
+
+pub use overlay::ChatOverlay;
+
+const HERDR_APP_BUNDLE_ID: &str = "dev.herdr.app";
 
 /// Keep the pet visible in every Space, including other applications'
 /// full-screen Spaces, so switching Spaces never strands the pet elsewhere.
@@ -31,6 +38,23 @@ pub fn float_on_all_spaces(window: &Window) -> bool {
             | NSWindowCollectionBehavior::Stationary,
     );
     true
+}
+
+/// Whether Herdr.app is the frontmost application.
+pub fn herdr_app_frontmost() -> bool {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .and_then(|application| application.bundleIdentifier())
+        .is_some_and(|id| id.to_string() == HERDR_APP_BUNDLE_ID)
+}
+
+/// Herdr.app's executable, which doubles as the `herdr-app` CLI. Asking
+/// LaunchServices keeps this working when the app is not in /Applications.
+pub fn herdr_app_path() -> Option<PathBuf> {
+    let url = NSWorkspace::sharedWorkspace()
+        .URLForApplicationWithBundleIdentifier(&NSString::from_str(HERDR_APP_BUNDLE_ID))?;
+    let path = url.path()?;
+    Some(PathBuf::from(path.to_string()).join("Contents/MacOS/Herdr"))
 }
 
 /// Global mouse position in physical pixels, top-left origin, using the
@@ -61,6 +85,242 @@ pub fn send_notification(message: &str) -> bool {
 /// anywhere outside the dialog dismisses it.
 pub fn show_about() {
     about::show();
+}
+
+mod overlay {
+    use objc2::rc::Retained;
+    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSBox, NSBoxType, NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSTextField,
+        NSTitlePosition, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+        NSVisualEffectState, NSVisualEffectView,
+    };
+    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use winit::window::Window;
+
+    use crate::chat::{BUBBLE_HEIGHT, BUBBLE_WIDTH, BUTTON_SIZE, ChatLayout};
+
+    const TITLE_INSET_TOP: f64 = 12.0;
+    const TEXT_INSET_X: f64 = 16.0;
+    const TEXT_LINE_HEIGHT: f64 = 16.0;
+    const TEXT_LINE_GAP: f64 = 4.0;
+    const CHEVRON_SIZE: f64 = 13.0;
+
+    // The glass views are display-only: returning nil from the container's hit
+    // test lets clicks fall through to winit's backing view, which owns the
+    // drag/toggle behaviour. Without this the effect views would swallow the
+    // arrow clicks before winit sees them.
+    define_class!(
+        // SAFETY: NSView has no subclassing requirements and this class has no
+        // ivars or Drop implementation.
+        #[unsafe(super(NSView))]
+        #[thread_kind = MainThreadOnly]
+        struct ClickThroughView;
+
+        impl ClickThroughView {
+            #[unsafe(method(hitTest:))]
+            fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+                std::ptr::null_mut()
+            }
+        }
+
+        unsafe impl NSObjectProtocol for ClickThroughView {}
+    );
+
+    pub struct ChatOverlay {
+        bubble: Retained<NSVisualEffectView>,
+        bubble_tint: Retained<NSBox>,
+        title: Retained<NSTextField>,
+        subtitle: Retained<NSTextField>,
+        button: Retained<NSVisualEffectView>,
+        button_tint: Retained<NSBox>,
+        chevron: Retained<NSImageView>,
+    }
+
+    impl ChatOverlay {
+        /// Attach the glass bubble and the toggle button to the winit view.
+        /// Returns None when AppKit handles are unavailable.
+        pub fn new(window: &Window, open: bool) -> Option<Self> {
+            let mtm = MainThreadMarker::new()?;
+            let content = content_view(window)?;
+            let container: Retained<ClickThroughView> = unsafe {
+                msg_send![
+                    mtm.alloc::<ClickThroughView>(),
+                    initWithFrame: content.bounds()
+                ]
+            };
+            container.setAutoresizingMask(
+                objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                    | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+
+            let (bubble, bubble_tint) = glass_view(
+                mtm,
+                BUBBLE_HEIGHT / 2.0,
+                NSColor::colorWithSRGBRed_green_blue_alpha(0.23, 0.26, 0.33, 0.62),
+                NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.09),
+            );
+            let title = label(
+                mtm,
+                NSFont::boldSystemFontOfSize(13.0),
+                NSColor::colorWithCalibratedWhite_alpha(1.0, 0.95),
+            );
+            let subtitle = label(
+                mtm,
+                NSFont::systemFontOfSize(13.0),
+                NSColor::colorWithCalibratedWhite_alpha(0.78, 0.88),
+            );
+            bubble.addSubview(&title);
+            bubble.addSubview(&subtitle);
+
+            let (button, button_tint) = glass_view(
+                mtm,
+                BUTTON_SIZE / 2.0,
+                NSColor::colorWithSRGBRed_green_blue_alpha(0.24, 0.27, 0.34, 0.58),
+                NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.12),
+            );
+            let chevron = NSImageView::new(mtm);
+            chevron.setContentTintColor(Some(&NSColor::colorWithCalibratedWhite_alpha(1.0, 0.92)));
+            button.addSubview(&chevron);
+
+            container.addSubview(&bubble);
+            container.addSubview(&button);
+            content.addSubview(&container);
+
+            let overlay = Self {
+                bubble,
+                bubble_tint,
+                title,
+                subtitle,
+                button,
+                button_tint,
+                chevron,
+            };
+            overlay.set_visible(open, true);
+            Some(overlay)
+        }
+
+        /// Reflow in AppKit's bottom-left point coordinates from the top-left
+        /// logical layout. Called on creation and whenever the window resizes.
+        pub fn layout(&self, layout: &ChatLayout, height: f64) {
+            self.bubble.setFrame(NSRect::new(
+                NSPoint::new(layout.bubble.x, height - layout.bubble.y - layout.bubble.h),
+                NSSize::new(layout.bubble.w, layout.bubble.h),
+            ));
+            self.bubble_tint.setFrame(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(layout.bubble.w, layout.bubble.h),
+            ));
+            let text_width = BUBBLE_WIDTH - TEXT_INSET_X * 2.0;
+            self.title.setFrame(NSRect::new(
+                NSPoint::new(
+                    TEXT_INSET_X,
+                    BUBBLE_HEIGHT - TITLE_INSET_TOP - TEXT_LINE_HEIGHT,
+                ),
+                NSSize::new(text_width, TEXT_LINE_HEIGHT),
+            ));
+            self.subtitle.setFrame(NSRect::new(
+                NSPoint::new(
+                    TEXT_INSET_X,
+                    BUBBLE_HEIGHT
+                        - TITLE_INSET_TOP
+                        - TEXT_LINE_HEIGHT
+                        - TEXT_LINE_GAP
+                        - TEXT_LINE_HEIGHT,
+                ),
+                NSSize::new(text_width, TEXT_LINE_HEIGHT),
+            ));
+            self.button.setFrame(NSRect::new(
+                NSPoint::new(layout.button.x, height - layout.button.y - layout.button.h),
+                NSSize::new(layout.button.w, layout.button.h),
+            ));
+            self.button_tint.setFrame(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(layout.button.w, layout.button.h),
+            ));
+            self.chevron.setFrame(NSRect::new(
+                NSPoint::new(
+                    (BUTTON_SIZE - CHEVRON_SIZE) / 2.0,
+                    (BUTTON_SIZE - CHEVRON_SIZE) / 2.0,
+                ),
+                NSSize::new(CHEVRON_SIZE, CHEVRON_SIZE),
+            ));
+        }
+
+        pub fn set_text(&self, title: &str, subtitle: &str) {
+            self.title.setStringValue(&NSString::from_str(title));
+            self.subtitle.setStringValue(&NSString::from_str(subtitle));
+        }
+
+        /// Hide the bubble and/or the button. The chevron follows the bubble:
+        /// down when expanded, up when collapsed or auto-hidden.
+        pub fn set_visible(&self, bubble: bool, button: bool) {
+            self.bubble.setHidden(!bubble);
+            self.button.setHidden(!button);
+            let symbol = if bubble { "chevron.down" } else { "chevron.up" };
+            if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str(symbol),
+                None,
+            ) {
+                image.setSize(NSSize::new(CHEVRON_SIZE, CHEVRON_SIZE));
+                self.chevron.setImage(Some(&image));
+            }
+        }
+    }
+
+    fn content_view(window: &Window) -> Option<Retained<NSView>> {
+        let handle = window.window_handle().ok()?;
+        let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+            return None;
+        };
+        // SAFETY: `ChatOverlay::new` runs on the main thread while winit keeps
+        // the NSView alive for the window's lifetime.
+        let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        view.window()?.contentView()
+    }
+
+    fn glass_view(
+        mtm: MainThreadMarker,
+        radius: f64,
+        fill: Retained<NSColor>,
+        border: Retained<NSColor>,
+    ) -> (Retained<NSVisualEffectView>, Retained<NSBox>) {
+        let view = NSVisualEffectView::new(mtm);
+        view.setMaterial(NSVisualEffectMaterial::HUDWindow);
+        view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        view.setState(NSVisualEffectState::Active);
+        view.setWantsLayer(true);
+        if let Some(layer) = view.layer() {
+            layer.setCornerRadius(radius);
+            layer.setMasksToBounds(true);
+        }
+
+        let tint = NSBox::new(mtm);
+        tint.setBoxType(NSBoxType::Custom);
+        tint.setTitlePosition(NSTitlePosition::NoTitle);
+        tint.setTransparent(false);
+        tint.setBorderWidth(1.0);
+        tint.setCornerRadius(radius);
+        tint.setFillColor(&fill);
+        tint.setBorderColor(&border);
+        view.addSubview(&tint);
+        (view, tint)
+    }
+
+    fn label(
+        mtm: MainThreadMarker,
+        font: Retained<NSFont>,
+        color: Retained<NSColor>,
+    ) -> Retained<NSTextField> {
+        let label = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        label.setFont(Some(&font));
+        label.setTextColor(Some(&color));
+        label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        label.setUsesSingleLineMode(true);
+        label.setMaximumNumberOfLines(1);
+        label
+    }
 }
 
 mod about {

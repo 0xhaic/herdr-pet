@@ -10,6 +10,8 @@ use crate::pet::Atlas;
 const SHADER: &str = r#"
 struct Rect {
     uv: vec4<f32>,
+    // Clip-space quad: [left, top, right, bottom].
+    bounds: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> rect: Rect;
@@ -24,12 +26,12 @@ struct VertexOut {
 @vertex
 fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
     var positions = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(1.0, -1.0),
+        vec2<f32>(rect.bounds.x, rect.bounds.y),
+        vec2<f32>(rect.bounds.z, rect.bounds.y),
+        vec2<f32>(rect.bounds.x, rect.bounds.w),
+        vec2<f32>(rect.bounds.x, rect.bounds.w),
+        vec2<f32>(rect.bounds.z, rect.bounds.y),
+        vec2<f32>(rect.bounds.z, rect.bounds.w),
     );
     var uvs = array<vec2<f32>, 6>(
         vec2<f32>(rect.uv.x, rect.uv.y),
@@ -56,6 +58,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FrameUniform {
+    uv: [f32; 4],
+    bounds: [f32; 4],
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -66,6 +75,7 @@ pub struct Renderer {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
+    frame: FrameUniform,
 }
 
 impl Renderer {
@@ -145,9 +155,14 @@ impl Renderer {
         });
 
         use wgpu::util::DeviceExt;
+        let frame = FrameUniform {
+            uv: atlas.cell_uv(0, 0),
+            // The whole window until the UI computes the pet's sub-rect.
+            bounds: [-1.0, 1.0, 1.0, -1.0],
+        };
         let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("uv rect"),
-            contents: bytemuck::cast_slice(&atlas.cell_uv(0, 0)),
+            label: Some("pet quad"),
+            contents: bytemuck::bytes_of(&frame),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -248,6 +263,7 @@ impl Renderer {
             bind_group_layout,
             sampler,
             uniform,
+            frame,
         })
     }
 
@@ -289,8 +305,21 @@ impl Renderer {
     }
 
     pub fn set_uv(&mut self, uv: [f32; 4]) {
+        self.frame.uv = uv;
+        self.write_frame();
+    }
+
+    /// Place the pet quad inside the window. `bounds` is clip-space
+    /// `[left, top, right, bottom]`; the rest of the window stays transparent
+    /// for the native glass views.
+    pub fn set_frame(&mut self, uv: [f32; 4], bounds: [f32; 4]) {
+        self.frame = FrameUniform { uv, bounds };
+        self.write_frame();
+    }
+
+    fn write_frame(&self) {
         self.queue
-            .write_buffer(&self.uniform, 0, bytemuck::cast_slice(&uv));
+            .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&self.frame));
     }
 
     pub fn render(&mut self) -> Result<()> {

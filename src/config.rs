@@ -13,7 +13,8 @@ pub const DEFAULT_SIZE: f64 = 104.0;
 pub struct Config {
     pub pet: Option<String>,
     pub size: f64,
-    /// Physical pixels, top-left origin.
+    /// Pet top-left in physical pixels (so expanding the bubble never moves
+    /// the pet); top-left origin.
     pub position: Option<[i32; 2]>,
     pub notifications: bool,
     pub notification_sound: bool,
@@ -21,6 +22,8 @@ pub struct Config {
     /// Whole-window mouse pass-through; when true the pet ignores the mouse
     /// entirely and cannot be dragged.
     pub click_through: bool,
+    /// Whether the chat bubble above the pet is expanded.
+    pub chat_open: bool,
 }
 
 impl Default for Config {
@@ -33,6 +36,7 @@ impl Default for Config {
             notification_sound: true,
             gaze: true,
             click_through: false,
+            chat_open: true,
         }
     }
 }
@@ -146,6 +150,7 @@ mod tests {
         assert!(config.notification_sound);
         assert!(config.gaze);
         assert!(!config.click_through);
+        assert!(config.chat_open);
     }
 
     #[test]
@@ -156,6 +161,7 @@ mod tests {
         assert!(config.notification_sound);
         assert!(config.gaze);
         assert!(!config.click_through);
+        assert!(config.chat_open);
         assert_eq!(config.pet, None);
     }
 
@@ -171,6 +177,7 @@ mod tests {
             notification_sound: false,
             gaze: false,
             click_through: true,
+            chat_open: false,
         };
         config.save_to(&path).unwrap();
         assert_eq!(load_from(&path), config);

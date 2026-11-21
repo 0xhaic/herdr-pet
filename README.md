@@ -9,6 +9,14 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **逐像素点击穿透**：鼠标落在宠物透明区域时穿透到桌面，落在宠物本体上可拖拽移动；松开后自动保存位置。
 - **状态汇总**：汇总本机所有 herdr agent，一只宠物显示最紧急的状态，优先级
   `Blocked > Error > Working > Done > Idle`（Working 高于 Done，站立只表示有任务在执行）。
+- **聊天框**：宠物上方固定两行的毛玻璃气泡，显示最紧急 agent 的任务标题与最新动作
+  （`status.msg`，缺省回退中文状态）。宠物右下角的箭头按钮收起/展开，开关写入配置。
+- **显示时机**：只有 Herdr 不在前台（或未启动）、且存在需要关注的 agent 时才显示
+  聊天 UI：`blocked` / `working` / `error` 始终算；`done` 在 Herdr 尚未标记已读时
+  也算，查看后自动消失。Herdr 在前台时气泡和按钮都隐藏；只有已读 `done` / `idle`
+  时也隐藏。宠物本体始终保留。
+- **与 Herdr 跳转**：聊天 UI 可见时，左键点击气泡或宠物会拉起 Herdr 并跳到对应
+  会话；拖动宠物不会触发跳转。Herdr 在前台时聊天 UI 已隐藏，点击宠物仍可跳转。
 - **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后回到坐姿、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
 - **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
@@ -29,6 +37,9 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   （session 取 `HC_SESSION`，默认 `default`）；连接断开时后台自动重连，宠物保留最后状态。
 - 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`），
   目录内包含 `pet.json` 与 `spritesheet.webp`。
+- Herdr.app（可选）：前台判断使用 `NSWorkspace`，点击跳转通过
+  `herdr-app do agent.focus` 实现；未安装或找不到时宠物其余功能正常，点击只会
+  尝试打开 Herdr。
 
 ## 构建与运行
 
@@ -112,7 +123,8 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
   "notifications": true,
   "notification_sound": true,
   "gaze": true,
-  "click_through": false
+  "click_through": false,
+  "chat_open": true
 }
 ```
 
@@ -120,11 +132,12 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | --- | --- | --- |
 | `pet` | `null` | 启动时使用的宠物名或目录；空则自动选第一只可加载宠物 |
 | `size` | `104` | 宠物高度（logical px），限制在 52–312 |
-| `position` | `null` | 窗口位置（物理像素，左上角原点）；启动时若在所有屏幕之外则回落到默认位置 |
+| `position` | `null` | 宠物左上角（物理像素，左上角原点）；收起/展开聊天框不会移动宠物。启动时若窗口在所有屏幕之外则回落到默认位置 |
 | `notifications` | `true` | 是否发送系统通知 |
 | `notification_sound` | `true` | 是否播放提醒音效 |
 | `gaze` | `true` | 凝视开关（idle 与 done 凝视窗口；素材无 look 行时自动禁用） |
 | `click_through` | `false` | 整窗点击穿透；开启后宠物不可拖拽 |
+| `chat_open` | `true` | 聊天框是否展开；宠物右下角箭头按钮切换并写回。仅在聊天 UI 可见时生效 |
 
 ## 状态与动画
 
@@ -161,6 +174,13 @@ herdr-core 清除终端状态时（例如 agent 退出、root shell 回到前台
 - 仅支持 macOS（CI 仅产出 arm64 构建）；从源码运行，或使用 `scripts/bundle.sh`
   自行打包，或下载 GitHub Actions 产出的未签名/未公证 `.app`。
 - 多显示器、混合缩放下全局坐标按主屏换算，宠物放在副屏时位置/凝视可能有偏差。
+- 前台判断每 250 ms 查询一次 `NSWorkspace`；Herdr 在前台时聊天 UI 整体隐藏，切走后
+  恢复。Herdr 启动中的点击跳转依赖 5 秒内完成启动，极慢的冷启动可能需要再点一次。
+- Herdr 在前台时无法通过箭头展开/收起气泡（按当前显示规则，整个聊天 UI 不可见）。
+- `done` 的已读状态读取 Herdr 的 `view.json`（每 500 ms，约 20 KB）：`attention`
+  中 `seen` 为 false 或没有记录时按未读处理，气泡保留；Herdr 打开并查看该终端后
+  标记 seen，下一次轮询即消失。Herdr 未运行/该文件不可读时 done 会一直按未读处理；
+  此时没有查看入口，气泡会保留。该文件是 Herdr 的内部状态，非公开 CLI。
 - 不做点击养成/亲密度、herdr 终端内浮层、宠物生成。
 
 ## 开发

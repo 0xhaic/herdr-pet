@@ -23,6 +23,12 @@
 > 60 秒凝视窗口（第 30–90 秒），窗口结束回到 idle 坐姿；计时按聚合状态连续保持
 > done 计算，Done 中断会重置。`cargo test`（80 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已重新打包覆盖安装。
+> 本地新增（未发版，2026-11-22）：宠物上方两行毛玻璃聊天框与右下角收起按钮；
+> 仅当 Herdr 不在前台（或未启动）且存在 blocked/working/error 或未读 done agent
+> 时显示，点击气泡或宠物拉起 Herdr 并跳到会话（见 3.10/3.11）。`cargo test`
+> （95 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿，
+> 已实机验证毛玻璃、实时文案、展开/收起、前台隐藏、error 保留、done 未读保留/
+> 已读消失、点击跳转、拖动不跳转与位置持久化。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
@@ -64,8 +70,10 @@ herdr-core (Unix socket, JSON-RPC)
         ▼
   main.rs（winit 主线程，60 Hz tick）
         ├── pet.rs    宠物加载 / 动画状态机 / 凝视
-        ├── render.rs 单张 atlas 纹理 + 全屏 quad
-        ├── platform/macos.rs  全局鼠标、拖拽、点击穿透
+        ├── chat.rs   聊天框布局、文案与焦点选择（纯逻辑）
+        ├── herdr_app.rs  Herdr 点击跳转（前台判断在主线程）
+        ├── render.rs 单张 atlas 纹理 + 宠物子矩形 quad
+        ├── platform/macos.rs  全局鼠标、拖拽、点击穿透、NSVisualEffectView 聊天框
         ├── notify.rs  afplay + 系统通知（osascript 回落）
         └── tray.rs    tray-icon 菜单
 ```
@@ -183,6 +191,13 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
   保证"崩溃"能被看到。Working 提到 Done 之前，避免长期存在的 done 终端压住
   仍在执行的任务——站立只表示有任务在执行。）
 - 输出 `Aggregate { status: Option<AgentStatus>, blocked, error, done, working, total }`。
+- 聊天框的聚焦 agent：只在 `live` 且 `status.is_some()` 的终端中选，先按优先级，
+  再按本表内的状态写入序号取最近一次更新（`focus()`）。`Status` 记录的 `msg`
+  随 `TerminalAgent` 保存为 `status_msg`；status 更新时同步，status 清除、
+  finished/lost 时清空，避免第二行残留旧动作。
+- `is_active_with(unseen_done)`：blocked / working / error 始终算活跃；done 取决于
+  回调，Herdr 未读时算活跃，已读后不算；idle 与无状态终端不算。聊天 UI 的可用性
+  用这个逐终端判断，而不是 `Aggregate` 计数。
 - 通知规则：
   - 只在状态的**变化沿**提醒：进入 `Blocked` 或 `Done`（`old != new`）。
   - 初始 snapshot 不提醒；`created` 后紧接的状态变化正常提醒。
@@ -237,7 +252,9 @@ Socket 发现顺序：
 
 ### 3.4 `render.rs` — wgpu 渲染
 
-- 一张 atlas 纹理（RGBA，非 sRGB），一个 quad，uniform 只含 UV 矩形。
+- 一张 atlas 纹理（RGBA，非 sRGB），一个 quad，uniform 含 UV 矩形与裁剪空间
+  子矩形 `[left, top, right, bottom]`；宠物只画在窗口内的宠物格子里，其余区域保持
+  全透明，供原生毛玻璃浮层合成。
 - 窗口服务器把非不透明 CAMetalLayer 当作 **sRGB 编码空间中的预乘 alpha**
   合成。因此 atlas 在上传前按 `rgb' = round(rgb * a)` 在编码空间预乘，
   纹理用 `Rgba8Unorm`；surface 选非 sRGB 格式，片元着色器原样输出采样值，
@@ -260,11 +277,19 @@ Socket 发现顺序：
 - 窗口：`with_decorations(false)`、`with_transparent(true)`、
   `with_resizable(false)`、`WindowLevel::AlwaysOnTop`、
   `ActivationPolicy::Accessory`（不显示 Dock 图标）。
-- 默认尺寸：高度 104 logical px（Retina 上正好 208 物理像素 = 原生分辨率），
-  宽度按 192/208 比例；位置默认主屏右下角，距边缘 24 px，可被拖拽覆盖并持久化。
-- 点击穿透：默认按像素判定——每帧读取全局鼠标位置，换算到当前帧像素，采样 alpha；
-  alpha < 16 时 `window.set_cursor_hittest(false)`，否则 true。
-  winit 0.30 在 macOS 上直接映射到 `setIgnoresMouseEvents:`。
+- 默认尺寸：宠物高度 104 logical px（Retina 上正好 208 物理像素 = 原生分辨率）。
+  窗口固定 336 logical px 宽（320 气泡 + 左右各 8 留白），高度为
+  `8 + 64 气泡 + 16 间距 + 宠物高 + 10 + 28 按钮 + 8`；宠物居中，气泡在宠物上方，
+  箭头按钮在宠物下方。位置默认主屏右下角，距边缘 24 px，可被拖拽覆盖并持久化。
+- 点击穿透：默认按像素判定——每帧读取全局鼠标位置，换算到窗口内 point 坐标；
+  宠物格内采样当前帧 alpha（alpha < 16 穿透），箭头按钮与展开状态的气泡矩形直接
+  可点击，其余区域穿透。`window.set_cursor_hittest` 在 winit 0.30 上映射到
+  `setIgnoresMouseEvents:`。
+- 点击归属：箭头按钮只切换聊天框（不拖拽）；点击气泡拉起 Herdr 并跳到当前会话；
+  宠物格内按下先进入拖拽候选，释放时位移 ≤ 3 logical px 才视为点击并跳转，超过则
+  只拖动窗口。聊天框隐藏时按钮/气泡矩形不再可点击或穿透拦截，但宠物点击仍可跳转。
+  拖动、悬停与凝视都以宠物格中心为基准，不受更高窗口影响。
+  `config.position` 持久化宠物左上角而非窗口左上角，收起/展开不移动宠物。
 - 整窗穿透开关（`config.click_through`）：开启后窗口始终
   `set_cursor_hittest(false)`，鼠标事件全部落到桌面，宠物不可拖拽；
   关闭后恢复上述逐像素判定。只能通过托盘菜单切换；切换时立即生效并持久化，
@@ -331,16 +356,20 @@ Socket 发现顺序：
   "notifications": true,
   "notification_sound": true,
   "gaze": true,
-  "click_through": false
+  "click_through": false,
+  "chat_open": true
 }
 ```
 
 - `pet`：名字或目录路径；空/缺失时取搜索目录中第一个可加载宠物。
-- `position`：物理像素、左上角原点；启动时若落在所有屏幕之外则回落到默认位置。
+- `position`：宠物左上角，物理像素、左上角原点；启动时换算成窗口位置并通过可见性
+  检查，窗口完全在所有屏幕之外则回落到默认位置。这样旧配置（窗口即宠物）升级后宠物
+  位置不变，展开/收起气泡也不会移动宠物。
 - `notifications` / `notification_sound`：分别控制系统通知与提醒音效，均默认 `true`；
   只关闭音效时仍发送通知，关闭提醒时两者都不执行。
 - `click_through`：整窗点击穿透开关，默认 `false`（保持逐像素穿透 + 可拖拽）；
   开启后鼠标完全穿透到桌面，只能通过托盘关闭。
+- `chat_open`：聊天框展开状态，默认 `true`；点击宠物下方箭头按钮切换并写回。
 - 写入采用"临时文件 + rename"原子替换；写入失败只记日志，不阻塞 UI。
 
 ### 3.9 图标资产 — `.app` 图标与托盘剪影
@@ -362,6 +391,75 @@ Socket 发现顺序：
 - 三方向探索稿与尺寸/托盘测试页保留在本地 `design/logo-preview.html`，仅作本地开发参照，
   不随仓库分发（已加入 `.gitignore`），不参与打包。
 
+### 3.10 `chat.rs` + AppKit 浮层 — 聊天框
+
+布局（logical px，窗口左上原点）：
+
+| 元素 | 几何 |
+| --- | --- |
+| 窗口宽 | 336 = 320 气泡 + 左右各 8 留白 |
+| 气泡 | 320 × 64，圆角 32，位于顶部，左右居中 |
+| 宠物格 | 192/208 比例的 cell，水平居中，顶部距气泡底 16 |
+| 箭头按钮 | 28 × 28 圆形，宠物格下方 6，右边缘与宠物格右边缘对齐 |
+
+- 窗口高度 = `8 + 64 + 16 + 宠物高 + 6 + 28 + 8`；收起只 `setHidden(true)` 气泡，
+  不改变窗口尺寸或位置，宠物不会跳动。
+- 气泡用 `NSVisualEffectView`（`HUDWindow`、`BehindWindow`、`Active`）提供真实背景
+  模糊，叠加半透明深灰 `NSBox` 填充与 1px 白色低透明度描边；两行 `NSTextField`
+  13 pt（标题粗体白、副标题常规灰），固定 16 pt 行高，单行尾部省略。
+  不用第二套 GUI 框架，也不在 wgpu 里伪造模糊。
+- 箭头按钮用同材质的圆形毛玻璃，chevron.down（展开）/ chevron.up（收起）为
+  SF Symbol。
+- 浮层挂在 winit 内容视图的透明容器的子视图上；容器 `hitTest:` 返回 nil，点击
+  交回 winit，由 3.5 的矩形判定处理，避免 AppKit 视图吞掉按钮点击。
+- 文案：第一行 = 聚焦 agent 的 `notification_text()`（title → name → where →
+  address）；第二行 = `status.msg`（程序自己的动作文案），为空时回退
+  `空闲 / 工作中 / 等待输入 / 已完成 / 出错了`。没有带状态的 agent 时显示
+  `暂无任务 / 等待 agent 状态`。文本折叠空白并截断到 120 字符，避免异常长度。
+- 状态：`config.chat_open` 默认 true；点击箭头切换并写回，不新增托盘菜单项。
+- 可用性：`chat_ui = active && !herdr_frontmost`。`active` 指任一 live agent 处于
+  `blocked` / `working` / `error`，或处于 `done` 且 Herdr 尚未标记已读；
+  `herdr_frontmost` 由 NSWorkspace 判断，Herdr 未启动时为 false。两者共同决定：
+  仅当存在活跃 agent 且 Herdr 不在前台时可用。不可用时气泡和按钮都
+  `setHidden(true)`，两者矩形退出逐像素命中（点击穿透）；宠物本体保留，点击宠物
+  仍会拉起 Herdr。可用时按钮显示，气泡按 `config.chat_open` 决定；Herdr 在前台时
+  无法展开/收起。
+- done 未读：读取 Herdr 的 `view.json` → `attention[address].seen`。seen=false 或
+  没有该终端记录时视为未读；Herdr 查看后 seen=true，下一次 500 ms 轮询即不再算
+  活跃。文件不可读时保持全部 done 未读（气泡保留），避免静默丢完成提醒。
+- 前台判断在主线程每 250 ms 调一次 `NSWorkspace.frontmostApplication`，不启动
+  `herdr-app status` 子进程，也不区分 Herdr 当前展示哪个 tab。
+- 渲染：宠物 quad 只占布局中的宠物格；子矩形由 App 每帧换算成裁剪空间坐标传给
+  shader，窗口其余区域保持透明。悬停、凝视中心与逐像素穿透都改用宠物格坐标。
+- 测试锚点：布局尺寸/居中/随高度增长、矩形半开区间、聚焦优先级与最近更新、
+  `msg` 跟随 status 更新/清除、单行折叠与截断。
+
+### 3.11 `herdr_app.rs` — 已读状态与点击跳转
+
+Herdr.app 负责窗口与布局，herdr-core 负责终端。可见性依赖 3.10 的
+`NSWorkspace` 前台判断和本模块的已读状态；本模块还负责点击后的窗口跳转，不碰
+herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
+
+- 已读轮询：后台线程每 500 ms 读取 Herdr 的 `view.json`，只取
+  `attention[*].seen` 为 true 的终端地址集合；读/解析失败时保留上一次成功结果
+  （首次失败为空集 = 全部未读）。路径解析顺序与 Herdr 一致：
+  `HERDR_APP_HOME` → `$XDG_CONFIG_HOME/herdr-app` → `~/.config/herdr-app`。
+  文件约 20 KB，无子进程。
+- 该文件是 Herdr 的内部视图状态（无公开 CLI 提供逐终端 seen）；Herdr 未运行或
+  文件不可读时 done 一直按未读处理。
+
+- 点击跳转：点气泡（按下即触发）或点宠物（释放且位移 ≤ 3 logical px）时，
+  捕获当前聚焦终端地址，后台线程先 `/usr/bin/open -b dev.herdr.app` 拉起/激活窗口，
+  再重试 `herdr-app do agent.focus --terminal <地址>`（25 × 200 ms，覆盖冷启动）。
+  无聚焦 agent 时只拉起窗口。点击期间用原子标记避免重复跳转线程。
+- 应用路径通过 `NSWorkspace.URLForApplicationWithBundleIdentifier:` 定位
+  `dev.herdr.app` 的可执行文件（兼作 `herdr-app` CLI）；找不到时无法跳转，宠物
+  其余功能不受影响。
+- 不再轮询 `herdr-app status`，也不解析 space/tab/agent；Herdr 前台时整个聊天 UI
+  隐藏，与当前打开哪个 tab 无关。
+- 测试锚点：attention 的 seen 地址解析、`is_active_with` 的 done 分支、点击阈值
+  与可见性组合逻辑；子进程跳转路径不做单测。
+
 ## 4. 错误处理与健壮性
 
 - 边界用 `anyhow::Result`；运行时路径禁止 `unwrap()`（测试除外）。
@@ -377,7 +475,12 @@ Socket 发现顺序：
 - `pet`：manifest 解析/默认值、尺寸校验、`frame_index` 边界、
   一次性行动画接续、长待机随机动作、凝视角度与死区、11 行以下禁用凝视。
 - `status`：聚合优先级、初始快照不提醒、进入 blocked/done 提醒、
-  finished/lost 排除、真实事件 JSON 解析。
+  finished/lost 排除、真实事件 JSON 解析、聚焦选择与 `msg` 更新/清除、
+  blocked/working/error 与未读 done 视为活跃。
+- `chat`：三段布局尺寸与居中、随宠物高度增长、矩形命中、两行文案回退、
+  单行折叠与截断。
+- `herdr_app`：`view.json` attention 的 seen 地址解析。
+- `main`：点击 vs 拖动阈值、聊天 UI 可见性（活跃 + Herdr 非前台）。
 - `herdr`：临时 Unix socket 假服务端，验证 hello → subscribe → 事件 → 重连。
 - `config`：默认值、round-trip、损坏文件回落。
 - `notify`：AppleScript 转义。
@@ -391,6 +494,15 @@ Socket 发现顺序：
 5. 鼠标绕宠物移动，确认 16 方向凝视；移入死区回到 idle。
 6. 连续 idle 15–30 秒，确认随机 waving/jumping 播放一次后回 idle；随机动作期间
    移入鼠标触发凝视，离开后 idle 重新计时。截图确认播放中无黑底、闪烁或越界。
+7. 聊天框：确认两行文案随 agent 状态实时变化、毛玻璃与圆角在深/浅背景上可见；
+   点击右下角箭头收起/展开并写回 `chat_open`，宠物屏幕位置不变；拖动宠物时气泡跟随；
+   点击气泡不会拖动窗口；收起后原气泡区域点击穿透。
+8. Herdr 前台时气泡和按钮同时消失，切到其它应用后恢复；Herdr 在后台时点宠物或
+   气泡会拉起 Herdr 并跳到对应终端；拖动宠物不会拉起 Herdr（前三项已实机验证，
+   冷启动未验证）。
+9. 无 blocked/working/error 且 done 都已读时气泡和按钮同时消失，只留宠物；
+   agent 进入 error 时气泡保留。done 未读时气泡保留，把 attention.seen 改为 true
+   后 500 ms 内消失（已用假 herdr + 假 view.json 验证）。
 
 测试素材：测试内用 `image` 生成 1536×1872 的合成 atlas；不提交任何用户宠物素材。
 
@@ -414,6 +526,19 @@ Socket 发现顺序：
   出现白边（均已实机验证，见 3.4）。
 - **tray-icon × winit**：已验证 0.26 + winit 0.30 在 `resumed` 中创建、
   菜单事件非阻塞轮询可用；保留 3.7 的降级路径。
+- **AppKit 浮层 × wgpu**：`NSVisualEffectView` 挂在 winit 内容视图的子视图上，
+  位于 CAMetalLayer 之上；容器 `hitTest:` 必须返回 nil，否则按钮点击会被 AppKit
+  吞掉。已在 macOS 实机验证模糊、圆角、Retina point 坐标、按钮切换与拖动。
+- **Herdr.app 前台判断**：主线程每 250 ms 查询一次 NSWorkspace，不启动子进程；
+  Herdr 前台时整个聊天 UI 隐藏，不区分当前 tab。点击跳转使用官方
+  `herdr-app do agent.focus`，不读写其内部 socket；`agent.focus` 对隐藏终端/子 agent
+  的行为以 CLI 文档为准；冷启动超过 5 秒时跳转可能失败并记录日志。绝不停止或重启
+  用户的 Herdr/core。
+- **Herdr 已读状态**：done 的 seen 读取 Herdr 内部 `view.json`（无公开 CLI），
+  每 500 ms 读一次、约 20 KB；解析失败保留上次结果，首次失败按全部未读。Herdr
+  未运行或文件不可读时 done 气泡会一直保留；这是「未查看不消失」的保守行为。
+  远端终端的 attention 键可能是 `machine/tN`，当前按终端地址精确匹配，未命中时
+  按未读处理。
 - **焦点抢占**：Accessory 策略下点击宠物目前不会把 App 带到前台；若后续
   改为 NSPanel/nonactivating 或行为变化，再按 3.5 处理。
 - **多显示器坐标**：首版用主屏的 scale/高度换算 `NSEvent` 全局坐标；

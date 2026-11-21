@@ -45,6 +45,9 @@ pub struct StatusRecord {
     pub state: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// The program's own words for what it is doing, shown in the chat bubble.
+    #[serde(default)]
+    pub msg: String,
 }
 
 /// The subset of herdr-core's `Terminal` that matters for aggregation.
@@ -73,11 +76,14 @@ pub struct TerminalAgent {
     pub labels: BTreeMap<String, String>,
     pub live: bool,
     pub status: Option<AgentStatus>,
+    pub status_msg: Option<String>,
     pub status_ms: Option<u64>,
+    /// Monotonic table order of the latest status write; breaks focus ties.
+    updated_at: u64,
 }
 
 impl TerminalAgent {
-    fn from_terminal(terminal: Terminal) -> Self {
+    fn from_terminal(terminal: Terminal, updated_at: u64) -> Self {
         let Terminal {
             address,
             title,
@@ -100,6 +106,11 @@ impl TerminalAgent {
         } else {
             Some(title)
         };
+        let status_msg = status
+            .as_ref()
+            .map(|record| record.msg.trim())
+            .filter(|msg| !msg.is_empty())
+            .map(str::to_owned);
         Self {
             address,
             title,
@@ -107,8 +118,15 @@ impl TerminalAgent {
             labels,
             live,
             status: agent_status,
+            status_msg,
             status_ms,
+            updated_at,
         }
+    }
+
+    /// The focused agent's latest action line, when the program reported one.
+    pub fn status_msg(&self) -> Option<&str> {
+        self.status_msg.as_deref()
     }
 
     /// Text priority: title, then name, then labels["where"], then address.
@@ -273,6 +291,7 @@ pub struct Aggregate {
 #[derive(Debug, Default)]
 pub struct StatusTable {
     terminals: BTreeMap<String, TerminalAgent>,
+    sequence: u64,
 }
 
 impl StatusTable {
@@ -280,11 +299,17 @@ impl StatusTable {
         Self::default()
     }
 
+    fn next_sequence(&mut self) -> u64 {
+        self.sequence += 1;
+        self.sequence
+    }
+
     /// Replace the table from a fresh subscription snapshot. Never notifies.
     pub fn apply_snapshot(&mut self, terminals: Vec<Terminal>) {
         self.terminals.clear();
         for terminal in terminals {
-            let agent = TerminalAgent::from_terminal(terminal);
+            let updated_at = self.next_sequence();
+            let agent = TerminalAgent::from_terminal(terminal, updated_at);
             self.terminals.insert(agent.address.clone(), agent);
         }
     }
@@ -294,7 +319,8 @@ impl StatusTable {
     pub fn apply_event(&mut self, event: Event) -> Option<StatusChange> {
         match event {
             Event::Created(terminal) => {
-                let agent = TerminalAgent::from_terminal(terminal);
+                let updated_at = self.next_sequence();
+                let agent = TerminalAgent::from_terminal(terminal, updated_at);
                 self.terminals.insert(agent.address.clone(), agent);
                 None
             }
@@ -302,6 +328,7 @@ impl StatusTable {
             Event::StatusCleared { terminal } => {
                 if let Some(agent) = self.terminals.get_mut(&terminal) {
                     agent.status = None;
+                    agent.status_msg = None;
                 }
                 None
             }
@@ -309,6 +336,7 @@ impl StatusTable {
                 if let Some(agent) = self.terminals.get_mut(&terminal) {
                     agent.live = false;
                     agent.status = None;
+                    agent.status_msg = None;
                 }
                 None
             }
@@ -334,12 +362,17 @@ impl StatusTable {
 
     fn update_status(&mut self, address: &str, record: StatusRecord) -> Option<StatusChange> {
         let new = AgentStatus::parse(&record.state)?;
+        let updated_at = self.next_sequence();
         let agent = self.terminals.get_mut(address)?;
         if !agent.live {
             return None;
         }
         let old = agent.status;
         agent.status = Some(new);
+        agent.status_msg = Some(record.msg.trim())
+            .filter(|msg| !msg.is_empty())
+            .map(str::to_owned);
+        agent.updated_at = updated_at;
         if old == Some(new) || !new.is_alert() {
             return None;
         }
@@ -347,6 +380,29 @@ impl StatusTable {
             address: agent.address.clone(),
             status: new,
             text: agent.notification_text(),
+        })
+    }
+
+    /// The live agent that drives the pet's aggregate status: highest priority,
+    /// then the most recently updated status. BTreeMap order breaks full ties.
+    pub fn focus(&self) -> Option<&TerminalAgent> {
+        self.terminals
+            .values()
+            .filter(|agent| agent.live && agent.status.is_some())
+            .max_by_key(|agent| (agent.status, agent.updated_at))
+    }
+
+    /// Whether any live agent needs the chat UI. Blocked, working and error
+    /// always do; done only counts while `unseen_done` says it has not been
+    /// viewed in Herdr. Idle and plain shells never count.
+    pub fn is_active_with(&self, unseen_done: impl Fn(&str) -> bool) -> bool {
+        self.terminals.values().any(|agent| {
+            agent.live
+                && match agent.status {
+                    Some(AgentStatus::Blocked | AgentStatus::Working | AgentStatus::Error) => true,
+                    Some(AgentStatus::Done) => unseen_done(&agent.address),
+                    Some(AgentStatus::Idle) | None => false,
+                }
         })
     }
 
@@ -389,6 +445,7 @@ mod tests {
             status: status.map(|state| StatusRecord {
                 state: state.to_owned(),
                 title: None,
+                msg: String::new(),
             }),
             ..Terminal::default()
         }
@@ -400,6 +457,7 @@ mod tests {
             status: StatusRecord {
                 state: state.to_owned(),
                 title: None,
+                msg: String::new(),
             },
         }
     }
@@ -427,6 +485,36 @@ mod tests {
 
         table.apply_event(status_event("t2", "blocked"));
         assert_eq!(table.aggregate().status, Some(AgentStatus::Blocked));
+    }
+
+    #[test]
+    fn table_is_active_with_unseen_done() {
+        let table = |state: Option<&str>| {
+            let mut table = StatusTable::new();
+            if let Some(state) = state {
+                table.apply_snapshot(vec![terminal("t1", "live", Some(state))]);
+            }
+            table
+        };
+        for state in ["blocked", "working", "error"] {
+            assert!(
+                table(Some(state)).is_active_with(|_| false),
+                "{state} should stay active even when seen"
+            );
+        }
+        assert!(!table(Some("idle")).is_active_with(|_| true));
+        assert!(!table(None).is_active_with(|_| true));
+
+        let done = table(Some("done"));
+        assert!(done.is_active_with(|_| true));
+        assert!(!done.is_active_with(|_| false));
+
+        let mut mixed = table(Some("done"));
+        mixed.apply_snapshot(vec![
+            terminal("t1", "live", Some("done")),
+            terminal("t2", "live", Some("working")),
+        ]);
+        assert!(mixed.is_active_with(|_| false));
     }
 
     #[test]
@@ -796,6 +884,7 @@ mod tests {
         agent.status = Some(StatusRecord {
             state: "working".to_owned(),
             title: Some("from status".to_owned()),
+            msg: String::new(),
         });
         table.apply_snapshot(vec![agent]);
         assert_eq!(
@@ -878,6 +967,66 @@ mod tests {
         let mut table = StatusTable::new();
         assert!(table.apply_event(Event::Missed).is_none());
         assert!(table.apply_event(Event::Ignored).is_none());
+    }
+
+    #[test]
+    fn focus_prefers_priority_then_latest_update() {
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            terminal("t1", "live", Some("working")),
+            terminal("t2", "live", Some("blocked")),
+            terminal("t3", "live", Some("blocked")),
+            terminal("t4", "finished", Some("error")),
+        ]);
+        // Blocked outranks working; the later snapshot entry wins the tie.
+        assert_eq!(
+            table.focus().map(|agent| agent.address.as_str()),
+            Some("t3")
+        );
+
+        // A fresh blocked status makes working t1 the most recent blocked.
+        table.apply_event(status_event("t1", "blocked"));
+        assert_eq!(
+            table.focus().map(|agent| agent.address.as_str()),
+            Some("t1")
+        );
+    }
+
+    #[test]
+    fn focus_ignores_plain_shells() {
+        let table_focus = {
+            let mut table = StatusTable::new();
+            table.apply_snapshot(vec![terminal("t1", "live", None)]);
+            table.focus().map(|agent| agent.address.clone())
+        };
+        assert_eq!(table_focus, None);
+    }
+
+    #[test]
+    fn status_message_tracks_updates_and_clears() {
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal("t1", "live", Some("working"))]);
+        assert_eq!(table.focus().and_then(|agent| agent.status_msg()), None);
+
+        let update = json!({
+            "type": "status",
+            "terminal": "t1",
+            "data": {"status": {"state": "working", "msg": "Running tests"}}
+        });
+        table.apply_event(parse_event(&update));
+        assert_eq!(
+            table.focus().and_then(|agent| agent.status_msg()),
+            Some("Running tests")
+        );
+
+        let clear = json!({
+            "type": "status",
+            "terminal": "t1",
+            "data": {"status": null}
+        });
+        table.apply_event(parse_event(&clear));
+        assert_eq!(table.focus(), None);
+        assert_eq!(table.aggregate().status, None);
     }
 
     #[test]
