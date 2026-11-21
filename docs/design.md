@@ -224,8 +224,9 @@ Socket 发现顺序：
   记录在 `data.status`（`records` 是其它记录）；`finished` 的 `data` 含
   `exit_code/finished_ms/reason/signal`；`title` 的 `data` 是 `{"title": ...}`；
   `labels` 的 `data` 是 `{"labels": {...}}`；`removed` 的 `data` 为空对象。
-  `status` 更新包没有 `data.status` 或 `state` 为空时按未知事件忽略，不得用
-  默认空状态覆盖终端现有状态。
+  `status` 更新包的 `data.status` 为 `null` 表示程序已清除状态（root shell
+  回到前台，例如 agent 退出后的普通 zsh/bash 终端），终端按 idle 处理；
+  `data.status` 缺失或 `state` 为空时按未知事件忽略，不得覆盖终端现有状态。
 - 协议以 herdr-core 0.1.21 实测为准（2026-11-19，直连 socket 抓包）；
   其它事件类型（`foreground`、`size`、`doc` 等）忽略。
 - `missed`：直接断开重连，靠新订阅拿新快照；不尝试补事件。

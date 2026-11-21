@@ -142,6 +142,11 @@ pub enum Event {
         terminal: String,
         status: StatusRecord,
     },
+    /// The program cleared its status (for example, the root shell returned to
+    /// the foreground); the terminal is idle again.
+    StatusCleared {
+        terminal: String,
+    },
     Finished {
         terminal: String,
     },
@@ -181,10 +186,16 @@ pub fn parse_event(params: &Value) -> Event {
         "created" => serde_json::from_value(data)
             .map(Event::Created)
             .unwrap_or(Event::Ignored),
-        "status" if !terminal.is_empty() => match parse_status(&data) {
-            Some(status) => Event::Status { terminal, status },
-            None => Event::Ignored,
-        },
+        "status" if !terminal.is_empty() => {
+            if status_cleared(&data) {
+                Event::StatusCleared { terminal }
+            } else {
+                match parse_status(&data) {
+                    Some(status) => Event::Status { terminal, status },
+                    None => Event::Ignored,
+                }
+            }
+        }
         "finished" if !terminal.is_empty() => Event::Finished { terminal },
         "lost" if !terminal.is_empty() => Event::Lost { terminal },
         "removed" if !terminal.is_empty() => Event::Removed { terminal },
@@ -211,9 +222,17 @@ pub fn parse_event(params: &Value) -> Event {
 }
 
 /// A `status` event's `data` wraps the root 7501 record as
-/// `{"records": {...}, "reported": bool, "status": {...}}`. Older payloads
-/// carried the record directly; accept both. A record without a non-empty
-/// `state` is malformed, not an empty-status update.
+/// `{"records": {...}, "reported": bool, "status": {...}}`. An explicit
+/// `"status": null` means the program cleared its status (herdr-core sends it
+/// when the root shell returns to the foreground), so the terminal is idle.
+/// Older payloads carried the record directly; accept both. A missing
+/// `status` key or a malformed record is not a clear and keeps the last status.
+fn status_cleared(data: &Value) -> bool {
+    matches!(data.get("status"), Some(Value::Null))
+}
+
+/// Parse a non-empty root 7501 record; a record without a non-empty `state`
+/// is malformed, not an empty-status update.
 fn parse_status(data: &Value) -> Option<StatusRecord> {
     let record = data.get("status").unwrap_or(data);
     let status: StatusRecord = serde_json::from_value(record.clone()).ok()?;
@@ -280,6 +299,12 @@ impl StatusTable {
                 None
             }
             Event::Status { terminal, status } => self.update_status(&terminal, status),
+            Event::StatusCleared { terminal } => {
+                if let Some(agent) = self.terminals.get_mut(&terminal) {
+                    agent.status = None;
+                }
+                None
+            }
             Event::Finished { terminal } | Event::Lost { terminal } => {
                 if let Some(agent) = self.terminals.get_mut(&terminal) {
                     agent.live = false;
@@ -650,7 +675,6 @@ mod tests {
     #[test]
     fn malformed_status_payloads_are_ignored() {
         for data in [
-            json!({"records": {}, "reported": false, "status": null}),
             json!({"records": {}, "reported": false}),
             json!({"state": ""}),
             json!({"status": "not a record"}),
@@ -665,6 +689,45 @@ mod tests {
                 "expected Ignored for {event}"
             );
         }
+    }
+
+    #[test]
+    fn null_status_is_a_clear() {
+        let clear = json!({
+            "type": "status",
+            "terminal": "t1",
+            "data": {"records": {}, "reported": true, "status": null}
+        });
+        assert!(matches!(
+            parse_event(&clear),
+            Event::StatusCleared { ref terminal } if terminal == "t1"
+        ));
+    }
+
+    #[test]
+    fn status_clear_returns_terminal_to_idle_without_notifying() {
+        let clear = |terminal: &str| {
+            parse_event(&json!({
+                "type": "status",
+                "terminal": terminal,
+                "data": {"records": {}, "reported": true, "status": null}
+            }))
+        };
+
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal("t1", "live", Some("working"))]);
+        assert_eq!(table.aggregate().status, Some(AgentStatus::Working));
+
+        assert!(table.apply_event(clear("t1")).is_none());
+        let aggregate = table.aggregate();
+        assert_eq!(aggregate.status, None);
+        assert_eq!(aggregate.working, 0);
+        assert_eq!(aggregate.total, 0);
+
+        // Clearing a done terminal is not a new alert edge.
+        table.apply_snapshot(vec![terminal("t1", "live", Some("done"))]);
+        assert!(table.apply_event(clear("t1")).is_none());
+        assert_eq!(table.aggregate().status, None);
     }
 
     #[test]

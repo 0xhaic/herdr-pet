@@ -139,6 +139,9 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | 鼠标悬停 | jumping ×3 → idle；覆盖除拖拽外的状态 |
 | idle / done 30–90 秒 + 鼠标 | look 行 9/10，按 16 方向选列 |
 
+只统计有 agent 状态的本机终端；普通 zsh/bash 等无状态终端按 idle 处理。
+herdr-core 清除终端状态时（例如 agent 退出、root shell 回到前台），宠物立即回到 idle。
+
 提醒只在状态**变化沿**触发：进入 blocked 或 done 时提醒，初始快照不提醒；
 拖拽、凝视或悬停会打断 idle 计时与随机动作。
 
