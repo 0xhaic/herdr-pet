@@ -25,8 +25,9 @@
 > `cargo clippy --all-targets -- -D warnings` 全绿，已重新打包覆盖安装。
 > 本地新增（未发版，2026-11-22）：宠物上方两行毛玻璃聊天框与右下角收起按钮；
 > 仅当 Herdr 不在前台（或未启动）且存在 blocked/working/error 或未读 done agent
-> 时显示，点击气泡或宠物拉起 Herdr 并跳到会话（见 3.10/3.11）。`cargo test`
-> （95 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿，
+> 时显示，点击气泡或宠物拉起 Herdr 并跳到会话（见 3.10/3.11）。气泡内容按
+> blocked/error → 未读 done → 最近状态变化的 working → 其它排序。`cargo test`
+> （96 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿，
 > 已实机验证毛玻璃、实时文案、展开/收起、前台隐藏、error 保留、done 未读保留/
 > 已读消失、点击跳转、拖动不跳转与位置持久化。
 
@@ -191,10 +192,15 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
   保证"崩溃"能被看到。Working 提到 Done 之前，避免长期存在的 done 终端压住
   仍在执行的任务——站立只表示有任务在执行。）
 - 输出 `Aggregate { status: Option<AgentStatus>, blocked, error, done, working, total }`。
-- 聊天框的聚焦 agent：只在 `live` 且 `status.is_some()` 的终端中选，先按优先级，
-  再按本表内的状态写入序号取最近一次更新（`focus()`）。`Status` 记录的 `msg`
+- 聊天框的聚焦 agent（`focus_with`）：只在 `live` 且 `status.is_some()` 的终端中
+  选，分组为 1) blocked/error、2) 未读 done、3) 最近一次状态变化的 working、
+  4) 其它；同一组取最早状态时间（working 组例外，取最近）。`status_ms` 来自快照；
+  状态事件使用接收时的墙上时钟，用于同一组的时间顺序。`Status` 记录的 `msg`
   随 `TerminalAgent` 保存为 `status_msg`；status 更新时同步，status 清除、
   finished/lost 时清空，避免第二行残留旧动作。
+- 气泡聚焦与宠物动画分开：动画仍用 `Aggregate.status` 的
+  `Blocked > Error > Working > Done > Idle` 聚合；气泡用上面的分组，两者可能指向
+  不同 agent（例如 bubble 选更早的 error，动画按 aggregate 选 blocked）。
 - `is_active_with(unseen_done)`：blocked / working / error 始终算活跃；done 取决于
   回调，Herdr 未读时算活跃，已读后不算；idle 与无状态终端不算。聊天 UI 的可用性
   用这个逐终端判断，而不是 `Aggregate` 计数。
@@ -431,8 +437,8 @@ Socket 发现顺序：
   `herdr-app status` 子进程，也不区分 Herdr 当前展示哪个 tab。
 - 渲染：宠物 quad 只占布局中的宠物格；子矩形由 App 每帧换算成裁剪空间坐标传给
   shader，窗口其余区域保持透明。悬停、凝视中心与逐像素穿透都改用宠物格坐标。
-- 测试锚点：布局尺寸/居中/随高度增长、矩形半开区间、聚焦优先级与最近更新、
-  `msg` 跟随 status 更新/清除、单行折叠与截断。
+- 测试锚点：布局尺寸/居中/随高度增长、矩形半开区间、气泡聚焦优先级与同组时间
+  顺序、`msg` 跟随 status 更新/清除、单行折叠与截断。
 
 ### 3.11 `herdr_app.rs` — 已读状态与点击跳转
 
@@ -475,8 +481,8 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 - `pet`：manifest 解析/默认值、尺寸校验、`frame_index` 边界、
   一次性行动画接续、长待机随机动作、凝视角度与死区、11 行以下禁用凝视。
 - `status`：聚合优先级、初始快照不提醒、进入 blocked/done 提醒、
-  finished/lost 排除、真实事件 JSON 解析、聚焦选择与 `msg` 更新/清除、
-  blocked/working/error 与未读 done 视为活跃。
+  finished/lost 排除、真实事件 JSON 解析、气泡聚焦优先级与同组时间顺序、
+  `msg` 更新/清除、blocked/working/error 与未读 done 视为活跃。
 - `chat`：三段布局尺寸与居中、随宠物高度增长、矩形命中、两行文案回退、
   单行折叠与截断。
 - `herdr_app`：`view.json` attention 的 seen 地址解析。
@@ -503,6 +509,8 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 9. 无 blocked/working/error 且 done 都已读时气泡和按钮同时消失，只留宠物；
    agent 进入 error 时气泡保留。done 未读时气泡保留，把 attention.seen 改为 true
    后 500 ms 内消失（已用假 herdr + 假 view.json 验证）。
+10. 多 agent 时确认气泡标题按 blocked/error → 未读 done → 最近状态变化的 working
+    → 其它切换；同组按状态时间先后。单测覆盖，多 agent 实机待回归。
 
 测试素材：测试内用 `image` 生成 1536×1872 的合成 atlas；不提交任何用户宠物素材。
 

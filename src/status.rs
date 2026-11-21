@@ -146,6 +146,18 @@ impl TerminalAgent {
     }
 }
 
+/// Wall clock of the last observed status change; snapshot values are
+/// herdr-core's `status_ms`, live events use their receipt time.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+fn order_key(agent: &TerminalAgent) -> (u64, u64) {
+    (agent.status_ms.unwrap_or(0), agent.updated_at)
+}
+
 fn status_title(status: &Option<StatusRecord>) -> Option<String> {
     status
         .as_ref()
@@ -329,6 +341,7 @@ impl StatusTable {
                 if let Some(agent) = self.terminals.get_mut(&terminal) {
                     agent.status = None;
                     agent.status_msg = None;
+                    agent.status_ms = None;
                 }
                 None
             }
@@ -337,6 +350,7 @@ impl StatusTable {
                     agent.live = false;
                     agent.status = None;
                     agent.status_msg = None;
+                    agent.status_ms = None;
                 }
                 None
             }
@@ -372,6 +386,7 @@ impl StatusTable {
         agent.status_msg = Some(record.msg.trim())
             .filter(|msg| !msg.is_empty())
             .map(str::to_owned);
+        agent.status_ms = Some(now_ms());
         agent.updated_at = updated_at;
         if old == Some(new) || !new.is_alert() {
             return None;
@@ -383,13 +398,44 @@ impl StatusTable {
         })
     }
 
-    /// The live agent that drives the pet's aggregate status: highest priority,
-    /// then the most recently updated status. BTreeMap order breaks full ties.
-    pub fn focus(&self) -> Option<&TerminalAgent> {
-        self.terminals
+    /// The agent the chat bubble shows:
+    /// 1. blocked / error (earliest status change first);
+    /// 2. done that Herdr has not marked seen (earliest completion first);
+    /// 3. the working agent whose status changed last;
+    /// 4. everything else (earliest first).
+    ///
+    /// The working agent's last status change is the best available proxy for
+    /// "last interacted"; Herdr exposes no per-tab interaction timestamp.
+    pub fn focus_with(&self, unseen_done: impl Fn(&str) -> bool) -> Option<&TerminalAgent> {
+        let last_working = self
+            .terminals
             .values()
-            .filter(|agent| agent.live && agent.status.is_some())
-            .max_by_key(|agent| (agent.status, agent.updated_at))
+            .filter(|agent| agent.live && agent.status == Some(AgentStatus::Working))
+            .max_by_key(|agent| order_key(agent))
+            .map(|agent| agent.address.as_str());
+        let mut best: Option<(&TerminalAgent, u8, (u64, u64))> = None;
+        for agent in self.terminals.values() {
+            if !agent.live || agent.status.is_none() {
+                continue;
+            }
+            let rank = match agent.status {
+                Some(AgentStatus::Blocked | AgentStatus::Error) => 0,
+                Some(AgentStatus::Done) if unseen_done(&agent.address) => 1,
+                Some(AgentStatus::Working) if last_working == Some(agent.address.as_str()) => 2,
+                _ => 3,
+            };
+            let key = order_key(agent);
+            let better = match best {
+                None => true,
+                Some((_, best_rank, best_key)) => {
+                    rank < best_rank || (rank == best_rank && key < best_key)
+                }
+            };
+            if better {
+                best = Some((agent, rank, key));
+            }
+        }
+        best.map(|(agent, _, _)| agent)
     }
 
     /// Whether any live agent needs the chat UI. Blocked, working and error
@@ -970,24 +1016,66 @@ mod tests {
     }
 
     #[test]
-    fn focus_prefers_priority_then_latest_update() {
+    fn focus_orders_blocked_error_unseen_done_last_working() {
+        let mut blocked = terminal("t1", "live", Some("blocked"));
+        blocked.status_ms = Some(100);
+        let mut error = terminal("t2", "live", Some("error"));
+        error.status_ms = Some(200);
+        let mut unseen_done = terminal("t3", "live", Some("done"));
+        unseen_done.status_ms = Some(50);
+        let mut old_working = terminal("t4", "live", Some("working"));
+        old_working.status_ms = Some(300);
+        let mut last_working = terminal("t5", "live", Some("working"));
+        last_working.status_ms = Some(400);
+        let mut seen_done = terminal("t6", "live", Some("done"));
+        seen_done.status_ms = Some(10);
         let mut table = StatusTable::new();
         table.apply_snapshot(vec![
-            terminal("t1", "live", Some("working")),
-            terminal("t2", "live", Some("blocked")),
-            terminal("t3", "live", Some("blocked")),
-            terminal("t4", "finished", Some("error")),
+            seen_done,
+            old_working,
+            last_working,
+            unseen_done,
+            error,
+            blocked,
         ]);
-        // Blocked outranks working; the later snapshot entry wins the tie.
-        assert_eq!(
-            table.focus().map(|agent| agent.address.as_str()),
-            Some("t3")
-        );
 
-        // A fresh blocked status makes working t1 the most recent blocked.
-        table.apply_event(status_event("t1", "blocked"));
+        let address = |table: &StatusTable, unseen: &[&str]| {
+            table
+                .focus_with(|address| unseen.contains(&address))
+                .map(|agent| agent.address.clone())
+        };
+        // Blocked/error first, earliest status change wins.
+        assert_eq!(address(&table, &["t3"]), Some("t1".to_owned()));
+        table.apply_event(Event::StatusCleared {
+            terminal: "t1".to_owned(),
+        });
+        assert_eq!(address(&table, &["t3"]), Some("t2".to_owned()));
+        table.apply_event(Event::StatusCleared {
+            terminal: "t2".to_owned(),
+        });
+
+        // Unseen done outranks the working tabs.
+        assert_eq!(address(&table, &["t3"]), Some("t3".to_owned()));
+        // Once seen, the working agent with the latest status change wins.
+        assert_eq!(address(&table, &[]), Some("t5".to_owned()));
+        table.apply_event(Event::StatusCleared {
+            terminal: "t5".to_owned(),
+        });
+        assert_eq!(address(&table, &[]), Some("t4".to_owned()));
+    }
+
+    #[test]
+    fn focus_picks_earliest_same_status_entry() {
+        let mut older = terminal("t1", "live", Some("done"));
+        older.status_ms = Some(100);
+        let mut newer = terminal("t2", "live", Some("done"));
+        newer.status_ms = Some(200);
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![newer, older]);
         assert_eq!(
-            table.focus().map(|agent| agent.address.as_str()),
+            table
+                .focus_with(|_| true)
+                .map(|agent| agent.address.as_str()),
             Some("t1")
         );
     }
@@ -997,7 +1085,9 @@ mod tests {
         let table_focus = {
             let mut table = StatusTable::new();
             table.apply_snapshot(vec![terminal("t1", "live", None)]);
-            table.focus().map(|agent| agent.address.clone())
+            table
+                .focus_with(|_| true)
+                .map(|agent| agent.address.clone())
         };
         assert_eq!(table_focus, None);
     }
@@ -1006,7 +1096,12 @@ mod tests {
     fn status_message_tracks_updates_and_clears() {
         let mut table = StatusTable::new();
         table.apply_snapshot(vec![terminal("t1", "live", Some("working"))]);
-        assert_eq!(table.focus().and_then(|agent| agent.status_msg()), None);
+        assert_eq!(
+            table
+                .focus_with(|_| true)
+                .and_then(|agent| agent.status_msg()),
+            None
+        );
 
         let update = json!({
             "type": "status",
@@ -1015,7 +1110,9 @@ mod tests {
         });
         table.apply_event(parse_event(&update));
         assert_eq!(
-            table.focus().and_then(|agent| agent.status_msg()),
+            table
+                .focus_with(|_| true)
+                .and_then(|agent| agent.status_msg()),
             Some("Running tests")
         );
 
@@ -1025,7 +1122,7 @@ mod tests {
             "data": {"status": null}
         });
         table.apply_event(parse_event(&clear));
-        assert_eq!(table.focus(), None);
+        assert_eq!(table.focus_with(|_| true), None);
         assert_eq!(table.aggregate().status, None);
     }
 

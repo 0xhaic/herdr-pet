@@ -5,7 +5,7 @@
 //! below it. Collapsing only hides the bubble views; the window keeps its size
 //! so the pet never jumps.
 
-use crate::status::{AgentStatus, StatusTable};
+use crate::status::{AgentStatus, TerminalAgent};
 
 /// Codex's activity pill is 320 pt wide with a 32 pt corner radius.
 pub const BUBBLE_WIDTH: f64 = 320.0;
@@ -110,8 +110,8 @@ pub struct ChatText {
 
 /// Two lines for the bubble: the focused agent's task title and its latest
 /// action (`status.msg`), falling back to a localized state word.
-pub fn chat_text(table: &StatusTable) -> ChatText {
-    match table.focus() {
+pub fn chat_text(agent: Option<&TerminalAgent>) -> ChatText {
+    match agent {
         Some(agent) => {
             let title = one_line(&agent.notification_text());
             let subtitle = agent
@@ -245,7 +245,7 @@ mod tests {
             terminal("t2", "live", Some("blocked"), "Permission needed"),
         ]);
         assert_eq!(
-            chat_text(&table),
+            chat_text(table.focus_with(|_| false)),
             ChatText {
                 title: "t2 title".to_owned(),
                 subtitle: "Permission needed".to_owned()
@@ -257,11 +257,10 @@ mod tests {
     fn text_falls_back_to_localized_state_and_placeholder() {
         let mut table = StatusTable::new();
         table.apply_snapshot(vec![terminal("t1", "live", Some("done"), "")]);
-        assert_eq!(chat_text(&table).subtitle, "已完成");
+        assert_eq!(chat_text(table.focus_with(|_| true)).subtitle, "已完成");
 
-        let empty = StatusTable::new();
         assert_eq!(
-            chat_text(&empty),
+            chat_text(None),
             ChatText {
                 title: "暂无任务".to_owned(),
                 subtitle: "等待 agent 状态".to_owned()

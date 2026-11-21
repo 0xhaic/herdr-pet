@@ -11,6 +11,11 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   `Blocked > Error > Working > Done > Idle`（Working 高于 Done，站立只表示有任务在执行）。
 - **聊天框**：宠物上方固定两行的毛玻璃气泡，显示最紧急 agent 的任务标题与最新动作
   （`status.msg`，缺省回退中文状态）。宠物右下角的箭头按钮收起/展开，开关写入配置。
+- **气泡内容优先级**：`blocked`/`error` → 未读 `done` → 最近状态变化的 `working`
+  → 其它。同一档取时间最早（blocked/error、未读 done）；`working` 取最近一次状态
+  变化作为「最后一次交互」的近似（herdr 没有逐标签页交互时间）。宠物动画仍按
+  `Blocked > Error > Working > Done > Idle` 的聚合优先级，因此气泡和动画可能指向
+  不同 agent。
 - **显示时机**：只有 Herdr 不在前台（或未启动）、且存在需要关注的 agent 时才显示
   聊天 UI：`blocked` / `working` / `error` 始终算；`done` 在 Herdr 尚未标记已读时
   也算，查看后自动消失。Herdr 在前台时气泡和按钮都隐藏；只有已读 `done` / `idle`
@@ -181,6 +186,8 @@ herdr-core 清除终端状态时（例如 agent 退出、root shell 回到前台
   中 `seen` 为 false 或没有记录时按未读处理，气泡保留；Herdr 打开并查看该终端后
   标记 seen，下一次轮询即消失。Herdr 未运行/该文件不可读时 done 会一直按未读处理；
   此时没有查看入口，气泡会保留。该文件是 Herdr 的内部状态，非公开 CLI。
+- 「最后一次交互的 working」用该终端最近一次状态变化时间近似；herdr-core 不提供
+  用户对标签页的交互时间戳，切换标签但状态未变化时不会更新这个顺序。
 - 不做点击养成/亲密度、herdr 终端内浮层、宠物生成。
 
 ## 开发

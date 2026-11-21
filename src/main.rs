@@ -26,7 +26,7 @@ use crate::config::Config;
 use crate::herdr::HerdrMessage;
 use crate::herdr_app::Attention;
 use crate::pet::{AnimInput, Animator, DragDir, Frame, GazeCell, Mood, Pet, gaze_cell};
-use crate::status::{AgentStatus, StatusTable};
+use crate::status::{AgentStatus, StatusTable, TerminalAgent};
 use crate::tray::Action;
 
 const USAGE: &str = "usage: herdr-pet [--pet <name|path>] [--list-pets]";
@@ -429,8 +429,15 @@ impl App {
         self.apply_chat_visibility();
     }
 
+    /// The agent the bubble shows (and click-to-jump targets), using the same
+    /// priority and Herdr seen state as the visibility rule.
+    fn focus_agent(&self) -> Option<&TerminalAgent> {
+        let seen = &self.herdr_attention.seen;
+        self.table.focus_with(|address| !seen.contains(address))
+    }
+
     fn focus_herdr_chat(&self) {
-        match self.table.focus() {
+        match self.focus_agent() {
             Some(agent) => herdr_app::focus_terminal(agent.address.clone()),
             None => herdr_app::raise_app_in_background(),
         }
@@ -451,7 +458,7 @@ impl App {
     }
 
     fn sync_chat(&mut self) {
-        let text = chat_text(&self.table);
+        let text = chat_text(self.focus_agent());
         if self.last_chat_text.as_ref() == Some(&text) {
             return;
         }
