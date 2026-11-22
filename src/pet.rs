@@ -452,6 +452,11 @@ impl Animator {
         Self::with_seed(look_enabled, seed)
     }
 
+    /// Toggle gaze rows at runtime, e.g. from the settings panel.
+    pub fn set_look_enabled(&mut self, enabled: bool) {
+        self.look_enabled = enabled;
+    }
+
     fn with_seed(look_enabled: bool, seed: u64) -> Self {
         let mut animator = Self {
             look_enabled,

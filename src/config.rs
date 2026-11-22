@@ -7,6 +7,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SIZE: f64 = 104.0;
+/// Allowed pet sprite heights in logical points.
+pub const MIN_SIZE: f64 = 52.0;
+pub const MAX_SIZE: f64 = 312.0;
 /// Opacity of the chat bubble's glass layer; labels stay fully opaque.
 pub const DEFAULT_CHAT_OPACITY: f64 = 0.7;
 

@@ -8,6 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 const ICON_BYTES: &[u8] = include_bytes!("../assets/tray-icon.png");
 const ID_SHOW: &str = "show";
 const ID_NEXT_PET: &str = "next-pet";
+const ID_SETTINGS: &str = "settings";
 const ID_BIGGER: &str = "bigger";
 const ID_SMALLER: &str = "smaller";
 const ID_CLICK_THROUGH: &str = "click-through";
@@ -20,6 +21,7 @@ const ID_QUIT: &str = "quit";
 pub enum Action {
     ToggleVisible,
     NextPet,
+    Settings,
     Bigger,
     Smaller,
     ToggleClickThrough,
@@ -40,6 +42,7 @@ impl Tray {
     pub fn new(notifications: bool, notification_sound: bool, click_through: bool) -> Result<Self> {
         let show = MenuItem::with_id(ID_SHOW, "显示/隐藏", true, None);
         let next = MenuItem::with_id(ID_NEXT_PET, "下一只宠物", true, None);
+        let settings = MenuItem::with_id(ID_SETTINGS, "设置…", true, None);
         let bigger = MenuItem::with_id(ID_BIGGER, "放大", true, None);
         let smaller = MenuItem::with_id(ID_SMALLER, "缩小", true, None);
         let click_through_item =
@@ -62,6 +65,7 @@ impl Tray {
         menu.append_items(&[
             &show,
             &next,
+            &settings,
             &separator_a,
             &bigger,
             &smaller,
@@ -122,6 +126,7 @@ fn action_for(id: &str) -> Option<Action> {
     match id {
         ID_SHOW => Some(Action::ToggleVisible),
         ID_NEXT_PET => Some(Action::NextPet),
+        ID_SETTINGS => Some(Action::Settings),
         ID_BIGGER => Some(Action::Bigger),
         ID_SMALLER => Some(Action::Smaller),
         ID_CLICK_THROUGH => Some(Action::ToggleClickThrough),
@@ -149,6 +154,7 @@ mod tests {
     fn maps_menu_ids_to_actions() {
         assert_eq!(action_for("show"), Some(Action::ToggleVisible));
         assert_eq!(action_for("next-pet"), Some(Action::NextPet));
+        assert_eq!(action_for("settings"), Some(Action::Settings));
         assert_eq!(action_for("bigger"), Some(Action::Bigger));
         assert_eq!(action_for("smaller"), Some(Action::Smaller));
         assert_eq!(

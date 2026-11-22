@@ -9,7 +9,7 @@ mod render;
 mod status;
 mod tray;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
@@ -26,15 +26,17 @@ use crate::config::Config;
 use crate::herdr::HerdrMessage;
 use crate::herdr_app::Attention;
 use crate::pet::{AnimInput, Animator, DragDir, Frame, GazeCell, Mood, Pet, gaze_cell};
+use crate::platform::{PanelAction, SettingsPanel};
 use crate::status::{AgentStatus, StatusTable, TerminalAgent};
 use crate::tray::Action;
 
 const USAGE: &str = "usage: herdr-pet [--pet <name|path>] [--list-pets]";
 const PET_HEIGHT: f64 = 104.0;
-const MIN_PET_HEIGHT: f64 = 52.0;
-const MAX_PET_HEIGHT: f64 = 312.0;
 const EDGE_MARGIN: f64 = 24.0;
 const TICK_INTERVAL: Duration = Duration::from_millis(16);
+/// Live slider changes apply immediately but hit the disk only after the
+/// user stops moving, so dragging does not rewrite the config every tick.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 const HIDDEN_INTERVAL: Duration = Duration::from_millis(250);
 const CLICK_ALPHA: u8 = 16;
 /// Movement under this many logical points counts as a click, not a drag.
@@ -160,6 +162,17 @@ fn open_pet_spec(spec: &str) -> Result<Pet> {
     )
 }
 
+fn pet_display_name(dir: &Path) -> String {
+    pet::load_manifest(dir)
+        .map(|manifest| manifest.display_name)
+        .unwrap_or_else(|_| {
+            dir.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("?")
+                .to_owned()
+        })
+}
+
 fn pet_spec(pet: &Pet) -> String {
     if let Ok(pets_dir) = pet::pets_dir()
         && pet.dir.parent() == Some(pets_dir.as_path())
@@ -172,7 +185,7 @@ fn pet_spec(pet: &Pet) -> String {
 
 fn clamp_size(size: f64) -> f64 {
     if size.is_finite() {
-        size.clamp(MIN_PET_HEIGHT, MAX_PET_HEIGHT)
+        size.clamp(config::MIN_SIZE, config::MAX_SIZE)
     } else {
         PET_HEIGHT
     }
@@ -254,6 +267,9 @@ struct App {
     primary_height: f64,
     primary_scale: f64,
     tray: Option<tray::Tray>,
+    panel: Option<SettingsPanel>,
+    /// When to persist live slider changes after the user stops moving.
+    save_due: Option<Instant>,
     pets: Vec<PathBuf>,
     pet_index: usize,
     chat_layout: ChatLayout,
@@ -304,6 +320,8 @@ impl App {
             primary_height: 0.0,
             primary_scale: 1.0,
             tray: None,
+            panel: None,
+            save_due: None,
             pets,
             pet_index,
             chat_layout,
@@ -433,9 +451,14 @@ impl App {
     }
 
     fn toggle_chat(&mut self) {
-        self.config.chat_open = !self.config.chat_open;
+        self.set_chat_open(!self.config.chat_open);
+    }
+
+    fn set_chat_open(&mut self, open: bool) {
+        self.config.chat_open = open;
         self.save_config();
         self.apply_chat_visibility();
+        self.sync_panel();
     }
 
     /// The agent the bubble shows (and click-to-jump targets), using the same
@@ -674,6 +697,8 @@ impl App {
     /// redraw when the visible cell actually changes.
     fn tick(&mut self) {
         self.drain_messages();
+        self.poll_panel();
+        self.flush_pending_save();
         let visible = self
             .window
             .as_ref()
@@ -755,34 +780,17 @@ impl App {
                     }
                 }
                 Action::NextPet => self.next_pet(),
+                Action::Settings => self.open_panel(),
                 Action::Bigger => self.set_size(self.config.size * 1.25),
                 Action::Smaller => self.set_size(self.config.size / 1.25),
                 Action::ToggleClickThrough => {
-                    self.config.click_through = !self.config.click_through;
-                    if let Some(tray) = &self.tray {
-                        tray.set_click_through(self.config.click_through);
-                    }
-                    if self.config.click_through {
-                        self.dragging = None;
-                    }
-                    if let Some(window) = &self.window {
-                        let _ = window.set_cursor_hittest(!self.config.click_through);
-                    }
-                    self.save_config();
+                    self.set_click_through(!self.config.click_through);
                 }
                 Action::ToggleNotifications => {
-                    self.config.notifications = !self.config.notifications;
-                    if let Some(tray) = &self.tray {
-                        tray.set_notifications(self.config.notifications);
-                    }
-                    self.save_config();
+                    self.set_notifications(!self.config.notifications);
                 }
                 Action::ToggleNotificationSound => {
-                    self.config.notification_sound = !self.config.notification_sound;
-                    if let Some(tray) = &self.tray {
-                        tray.set_notification_sound(self.config.notification_sound);
-                    }
-                    self.save_config();
+                    self.set_notification_sound(!self.config.notification_sound);
                 }
                 Action::About => platform::show_about(),
                 Action::Quit => {
@@ -793,15 +801,164 @@ impl App {
         }
     }
 
+    fn open_panel(&mut self) {
+        if self.panel.is_none() {
+            let names: Vec<String> = self.pets.iter().map(|dir| pet_display_name(dir)).collect();
+            match SettingsPanel::new(&names, self.pet_index, &self.config) {
+                Some(panel) => self.panel = Some(panel),
+                None => {
+                    eprintln!("herdr-pet: settings panel unavailable");
+                    return;
+                }
+            }
+        }
+        if let Some(panel) = &self.panel {
+            panel.show();
+        }
+    }
+
+    fn poll_panel(&mut self) {
+        let Some(panel) = &mut self.panel else {
+            return;
+        };
+        let actions = panel.poll();
+        for action in actions {
+            match action {
+                PanelAction::SelectPet(index) => {
+                    self.select_pet(index);
+                }
+                PanelAction::SetSize(height) => self.preview_size(height),
+                PanelAction::SetChatOpacity(opacity) => self.set_chat_opacity(opacity),
+                PanelAction::SetNotifications(enabled) => self.set_notifications(enabled),
+                PanelAction::SetNotificationSound(enabled) => {
+                    self.set_notification_sound(enabled);
+                }
+                PanelAction::SetGaze(enabled) => self.set_gaze(enabled),
+                PanelAction::SetClickThrough(enabled) => self.set_click_through(enabled),
+                PanelAction::SetChatOpen(open) => self.set_chat_open(open),
+            }
+        }
+    }
+
+    fn sync_panel(&mut self) {
+        if let Some(panel) = &mut self.panel {
+            panel.sync(&self.config, self.pet_index);
+        }
+    }
+
+    fn schedule_save(&mut self) {
+        self.save_due = Some(Instant::now() + SAVE_DEBOUNCE);
+    }
+
+    fn flush_pending_save(&mut self) {
+        if self.save_due.is_some_and(|due| Instant::now() >= due) {
+            self.save_due = None;
+            self.save_config();
+        }
+    }
+
+    fn set_notifications(&mut self, enabled: bool) {
+        self.config.notifications = enabled;
+        if let Some(tray) = &self.tray {
+            tray.set_notifications(enabled);
+        }
+        self.save_config();
+        self.sync_panel();
+    }
+
+    fn set_notification_sound(&mut self, enabled: bool) {
+        self.config.notification_sound = enabled;
+        if let Some(tray) = &self.tray {
+            tray.set_notification_sound(enabled);
+        }
+        self.save_config();
+        self.sync_panel();
+    }
+
+    fn set_gaze(&mut self, enabled: bool) {
+        self.config.gaze = enabled;
+        self.animator
+            .set_look_enabled(enabled && self.pet.atlas.gaze_enabled());
+        self.save_config();
+        self.sync_panel();
+    }
+
+    fn set_click_through(&mut self, enabled: bool) {
+        self.config.click_through = enabled;
+        if let Some(tray) = &self.tray {
+            tray.set_click_through(enabled);
+        }
+        if enabled {
+            self.dragging = None;
+        }
+        if let Some(window) = &self.window {
+            let _ = window.set_cursor_hittest(!enabled);
+        }
+        self.save_config();
+        self.sync_panel();
+    }
+
+    /// Apply a slider drag immediately; the disk write waits for the debounce.
+    fn preview_size(&mut self, height: f64) {
+        self.apply_size(height);
+        self.sync_panel();
+        self.schedule_save();
+    }
+
     fn set_size(&mut self, height: f64) {
+        self.apply_size(height);
+        if self.window.is_some() {
+            self.save_after_resize = true;
+        }
+        self.save_config();
+        self.sync_panel();
+    }
+
+    fn apply_size(&mut self, height: f64) {
         self.config.size = clamp_size(height);
         let layout = ChatLayout::new(self.config.size);
         self.chat_layout = layout;
         if let Some(window) = &self.window {
             let _ = window.request_inner_size(LogicalSize::new(layout.window.0, layout.window.1));
-            self.save_after_resize = true;
         }
-        self.save_config();
+    }
+
+    fn set_chat_opacity(&mut self, opacity: f64) {
+        self.config.chat_opacity = clamp_chat_opacity(opacity);
+        if let Some(overlay) = &self.overlay {
+            overlay.set_opacity(self.config.chat_opacity);
+        }
+        self.sync_panel();
+        self.schedule_save();
+    }
+
+    fn select_pet(&mut self, index: usize) -> bool {
+        let Some(dir) = self.pets.get(index) else {
+            self.sync_panel();
+            return false;
+        };
+        match pet::load_pet(dir) {
+            Ok(next) => {
+                self.pet = next;
+                self.pet_index = index;
+                self.animator = Animator::new(self.config.gaze && self.pet.atlas.gaze_enabled());
+                self.config.pet = Some(pet_spec(&self.pet));
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.replace_atlas(&self.pet.atlas);
+                }
+                self.pending_uv = self.pet.atlas.cell_uv(0, 0);
+                self.force_redraw = true;
+                self.next_tick = Instant::now();
+                self.save_config();
+                self.sync_panel();
+                true
+            }
+            Err(error) => {
+                eprintln!("herdr-pet: skipping {}: {error:#}", dir.display());
+                self.sync_panel();
+                false
+            }
+        }
     }
 
     fn next_pet(&mut self) {
@@ -810,26 +967,8 @@ impl App {
         }
         for offset in 1..=self.pets.len() {
             let index = (self.pet_index + offset) % self.pets.len();
-            match pet::load_pet(&self.pets[index]) {
-                Ok(next) => {
-                    self.pet = next;
-                    self.pet_index = index;
-                    self.animator =
-                        Animator::new(self.config.gaze && self.pet.atlas.gaze_enabled());
-                    self.config.pet = Some(pet_spec(&self.pet));
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.replace_atlas(&self.pet.atlas);
-                    }
-                    self.pending_uv = self.pet.atlas.cell_uv(0, 0);
-                    self.force_redraw = true;
-                    self.next_tick = Instant::now();
-                    self.save_config();
-                    return;
-                }
-                Err(error) => eprintln!(
-                    "herdr-pet: skipping {}: {error:#}",
-                    self.pets[index].display()
-                ),
+            if self.select_pet(index) {
+                return;
             }
         }
     }
