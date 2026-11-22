@@ -769,7 +769,18 @@ mod settings {
             let global_window = window.clone();
             let global_handler: RcBlock<dyn Fn(NonNull<NSEvent>)> =
                 RcBlock::new(move |_event: NonNull<NSEvent>| {
-                    global_window.orderOut(None);
+                    // Global events carry no window. When the app is inactive,
+                    // clicking the floating panel also arrives here; keep it
+                    // open when the pointer is physically over the panel.
+                    let frame = global_window.frame();
+                    let p = NSEvent::mouseLocation();
+                    let inside = p.x >= frame.origin.x
+                        && p.x < frame.origin.x + frame.size.width
+                        && p.y >= frame.origin.y
+                        && p.y < frame.origin.y + frame.size.height;
+                    if !inside {
+                        global_window.orderOut(None);
+                    }
                 });
             let global =
                 NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global_handler);
