@@ -19,9 +19,10 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::monitor::MonitorHandle;
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::chat::{ChatLayout, ChatText, chat_text};
+use crate::chat::{ChatLayout, ChatText, Rect, chat_text};
 use crate::config::Config;
 use crate::herdr::HerdrMessage;
 use crate::herdr_app::Attention;
@@ -221,6 +222,87 @@ struct Drag {
     last_mouse: (f64, f64),
     start_window: PhysicalPosition<i32>,
     dir: DragDir,
+    /// Screen area the pet is confined to for this drag, fixed at its start.
+    bounds: Option<ScreenArea>,
+    /// Window scale the bounds and drag offsets are expressed in.
+    scale: f64,
+}
+
+/// Screen area in physical pixels with a top-left origin, matching winit's
+/// monitor and window coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScreenArea {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl ScreenArea {
+    /// The area of `monitor` with its top edge below the menu bar.
+    fn of(monitor: &MonitorHandle) -> Self {
+        let origin = monitor.position();
+        let size = monitor.size();
+        let top = f64::from(origin.y) + platform::menu_bar_height(monitor);
+        Self {
+            x: f64::from(origin.x),
+            y: top,
+            width: f64::from(size.width),
+            height: (f64::from(origin.y) + f64::from(size.height) - top).max(0.0),
+        }
+    }
+
+    /// Move a window top-left so the pet sprite stays inside this area.
+    /// When the pet is larger than the area, its top-left edge wins.
+    fn clamp_window(
+        self,
+        position: PhysicalPosition<i32>,
+        pet: Rect,
+        scale: f64,
+    ) -> PhysicalPosition<i32> {
+        let origin_x = pet.x * scale;
+        let origin_y = pet.y * scale;
+        let min_x = (self.x - origin_x).ceil();
+        let max_x = (self.x + self.width - pet.w * scale - origin_x).floor();
+        let min_y = (self.y - origin_y).ceil();
+        let max_y = (self.y + self.height - pet.h * scale - origin_y).floor();
+        PhysicalPosition::new(
+            clamp_axis(f64::from(position.x), min_x, max_x) as i32,
+            clamp_axis(f64::from(position.y), min_y, max_y) as i32,
+        )
+    }
+}
+
+/// Clamp to an inclusive range, pinning to `min` when the range is empty.
+fn clamp_axis(value: f64, min: f64, max: f64) -> f64 {
+    if min <= max {
+        value.clamp(min, max)
+    } else {
+        min
+    }
+}
+
+/// Physical pixel position of the pet sprite's centre for a window top-left.
+fn pet_center(position: PhysicalPosition<i32>, pet: Rect, scale: f64) -> (f64, f64) {
+    (
+        f64::from(position.x) + (pet.x + pet.w / 2.0) * scale,
+        f64::from(position.y) + (pet.y + pet.h / 2.0) * scale,
+    )
+}
+
+/// First monitor whose full area contains `point`.
+fn monitor_at(
+    mut monitors: impl Iterator<Item = MonitorHandle>,
+    point: (f64, f64),
+) -> Option<MonitorHandle> {
+    monitors.find(|monitor| {
+        let origin = monitor.position();
+        let size = monitor.size();
+        point.0 >= f64::from(origin.x)
+            && point.0 < f64::from(origin.x) + f64::from(size.width)
+            && point.1 >= f64::from(origin.y)
+            && point.1 < f64::from(origin.y) + f64::from(size.height)
+    })
 }
 
 fn step_dir(current: DragDir, dx: f64) -> DragDir {
@@ -609,11 +691,20 @@ impl App {
             return;
         };
         if let Ok(position) = window.outer_position() {
+            let scale = window.scale_factor();
+            let pet = self.chat_layout.pet;
+            let monitor = monitor_at(
+                window.available_monitors(),
+                pet_center(position, pet, scale),
+            )
+            .or_else(|| window.current_monitor());
             self.dragging = Some(Drag {
                 start_mouse: pointer,
                 last_mouse: pointer,
                 start_window: position,
                 dir: DragDir::Right,
+                bounds: monitor.map(|monitor| ScreenArea::of(&monitor)),
+                scale,
             });
             self.click_candidate = Some(pointer);
             self.set_cursor_hittest(true);
@@ -641,10 +732,13 @@ impl App {
         drag.dir = step_dir(drag.dir, pointer.0 - drag.last_mouse.0);
         drag.last_mouse = pointer;
         if let Some(window) = self.window.clone() {
-            let position = PhysicalPosition::new(
+            let mut position = PhysicalPosition::new(
                 (drag.start_window.x as f64 + dx).round() as i32,
                 (drag.start_window.y as f64 + dy).round() as i32,
             );
+            if let Some(bounds) = drag.bounds {
+                position = bounds.clamp_window(position, self.chat_layout.pet, drag.scale);
+            }
             window.set_outer_position(position);
         }
         self.dragging = Some(drag);
@@ -1277,6 +1371,70 @@ mod tests {
         assert!(!chat_ui_available(true, true));
         assert!(!chat_ui_available(false, false));
         assert!(!chat_ui_available(false, true));
+    }
+
+    #[test]
+    fn pet_drag_is_clamped_inside_the_screen_below_the_menu_bar() {
+        let area = ScreenArea {
+            x: 0.0,
+            y: 25.0,
+            width: 1440.0,
+            height: 875.0,
+        };
+        let pet = Rect {
+            x: 120.0,
+            y: 88.0,
+            w: 96.0,
+            h: 104.0,
+        };
+        let pet_top_left = |position: PhysicalPosition<i32>, scale: f64| {
+            (
+                f64::from(position.x) + pet.x * scale,
+                f64::from(position.y) + pet.y * scale,
+            )
+        };
+
+        // The pet never enters the menu bar, even when dragged far past it.
+        let top_left = area.clamp_window(PhysicalPosition::new(-5000, -5000), pet, 2.0);
+        assert_eq!(pet_top_left(top_left, 2.0), (0.0, 25.0));
+
+        // Nor does it leave the right or bottom edge.
+        let bottom_right = area.clamp_window(PhysicalPosition::new(5000, 5000), pet, 2.0);
+        assert_eq!(
+            pet_top_left(bottom_right, 2.0),
+            (f64::from(1440 - 96 * 2), f64::from(25 + 875 - 104 * 2))
+        );
+
+        // Positions already inside the screen are left alone.
+        let inside = PhysicalPosition::new(500, 300);
+        assert_eq!(area.clamp_window(inside, pet, 2.0), inside);
+
+        // Non-Retina screens use the same rules.
+        let standard = area.clamp_window(PhysicalPosition::new(5000, 5000), pet, 1.0);
+        assert_eq!(
+            pet_top_left(standard, 1.0),
+            (f64::from(1440 - 96), f64::from(25 + 875 - 104))
+        );
+    }
+
+    #[test]
+    fn pet_clamp_does_not_panic_when_the_pet_is_larger_than_the_screen() {
+        let tiny = ScreenArea {
+            x: 0.0,
+            y: 25.0,
+            width: 100.0,
+            height: 80.0,
+        };
+        let pet = Rect {
+            x: 120.0,
+            y: 88.0,
+            w: 96.0,
+            h: 104.0,
+        };
+        assert_eq!(
+            tiny.clamp_window(PhysicalPosition::new(500, 300), pet, 2.0),
+            PhysicalPosition::new(-240, -151)
+        );
     }
 
     #[test]

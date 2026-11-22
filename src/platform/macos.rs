@@ -6,8 +6,9 @@
 
 use std::path::PathBuf;
 
-use objc2_app_kit::{NSEvent, NSView, NSWindowCollectionBehavior, NSWorkspace};
+use objc2_app_kit::{NSEvent, NSScreen, NSView, NSWindowCollectionBehavior, NSWorkspace};
 use objc2_foundation::NSString;
+use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
@@ -15,6 +16,9 @@ pub use overlay::ChatOverlay;
 pub use settings::SettingsPanel;
 
 const HERDR_APP_BUNDLE_ID: &str = "dev.herdr.app";
+/// Classic menu bar height in points, used when AppKit cannot map a monitor
+/// to its `NSScreen`.
+const MENU_BAR_FALLBACK: f64 = 25.0;
 
 /// Keep the pet visible in every Space, including other applications'
 /// full-screen Spaces, so switching Spaces never strands the pet elsewhere.
@@ -56,6 +60,23 @@ pub fn herdr_app_path() -> Option<PathBuf> {
         .URLForApplicationWithBundleIdentifier(&NSString::from_str(HERDR_APP_BUNDLE_ID))?;
     let path = url.path()?;
     Some(PathBuf::from(path.to_string()).join("Contents/MacOS/Herdr"))
+}
+
+/// Menu bar height in physical pixels for a monitor's screen, so the pet can
+/// stay below it. Derived from `visibleFrame`, whose top inset is the menu
+/// bar; the Dock inset is ignored. Falls back to the classic menu bar height
+/// when AppKit cannot identify the screen.
+pub fn menu_bar_height(monitor: &winit::monitor::MonitorHandle) -> f64 {
+    let Some(pointer) = monitor.ns_screen() else {
+        return (MENU_BAR_FALLBACK * monitor.scale_factor()).round();
+    };
+    // SAFETY: winit returns the NSScreen backing this monitor; we only read
+    // its geometry on the main thread inside the event loop.
+    let screen = unsafe { &*pointer.cast::<NSScreen>() };
+    let frame = screen.frame();
+    let visible = screen.visibleFrame();
+    let height = (frame.origin.y + frame.size.height) - (visible.origin.y + visible.size.height);
+    (height.max(0.0) * screen.backingScaleFactor()).round()
 }
 
 /// Global mouse position in physical pixels, top-left origin, using the
