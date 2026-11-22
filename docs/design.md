@@ -156,7 +156,7 @@ Mood::Failed   -> failed（循环）
 Mood::Idle     -> idle（循环）-> 长待机随机 waving / jumping（一次）-> idle
 拖动中         -> running-right / running-left（覆盖 Mood）
 Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
-鼠标悬停       -> jumping ×3 -> idle（覆盖除拖拽外的状态）
+鼠标悬停（仅 Row 0）-> jumping ×3 -> idle；其它动画行/状态期间不触发
 ```
 
 `Mood::Review` 表示聚合状态为 Done、且至少一个 done 终端尚未被 Herdr 标记已读；
@@ -170,8 +170,8 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
   每段连续 idle 满 15–30 秒后随机选择 waving 或 jumping，播完回到 idle。
   15–30 秒包含两端；随机源用可注入种子的轻量 PRNG，不新增依赖。
   其他 Mood 不用随机动作覆盖，以免遮蔽工作状态。idle 计时只在 Base + Idle 状态下推进；
-  拖拽、凝视或悬停打断当前 idle/随机动作，返回时从头播放当前 Mood 的入场动作并重置 idle 计时
-  （Done 坐姿的凝视例外：返回坐姿，不重播 jumping）。
+  拖拽、凝视会打断当前 idle/随机动作；悬停仅在 idle 行触发并打断 idle。返回时从头播放
+  当前 Mood 的入场动作并重置 idle 计时（Done 坐姿的凝视例外：返回坐姿，不重播 jumping）。
 - 凝视：`angle = atan2(dx, -dy)`，0° 向上，顺时针每 22.5° 一格，共 16 格；
   距离小于死区（24 logical px）回落到 idle。鼠标在宠物正上方时 `000`。
   已读 Done 的 jumping 播放结束后进入坐姿；未读 Done 在 jumping 后循环 review
@@ -181,9 +181,11 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
   凝视区也回到 idle 坐姿，且本次 Done 不再凝视；jumping 入场本身不会被凝视打断。
   计时只随聚合状态是否连续为 Done 推进：拖拽、悬停不会暂停或重置；聚合状态离开
   Done 后再次进入时，重新从 30 秒延迟开始。
-- 悬停：与 Codex 宠物组件的 `respondToHover` 一致。鼠标进入宠物窗口矩形即悬停，
-  播放 jumping 3 次后进入 idle 坐姿循环；悬停期间覆盖除拖拽外的状态并暂停凝视，
-  移出后恢复当前 Mood（重置 idle 计时）。
+- 悬停：与 Codex 宠物组件的 `respondToHover` 一致，但只在宠物当前显示 idle 行
+  （Row 0）时触发。鼠标进入宠物窗口矩形后播放 jumping 3 次，随后进入 idle 坐姿
+  循环；其它动画行或状态（working、blocked/waiting、review、done 入场、failed、
+  拖拽、凝视行）期间悬停不触发、也不改变动画。悬停反应启动后覆盖其它状态并暂停
+  凝视，移出后恢复当前 Mood（重置 idle 计时）。
 - Done 按已读状态拆分：herdr 的 done 语义是「你没看的时候完成了」，未读 done 在
   jumping 后循环 review，提示有完成结果待查看；Herdr 标记已读后回到 idle 坐姿，
   已读 done 不长期站立。凝视窗口仍从首次观察到聚合连续 Done 起算（Review 段照常
@@ -191,7 +193,8 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
   `view.json` 不可读时全部 done 按未读处理，review 会一直保持（与气泡保留一致）。
 - 测试锚点：`frame_index` 边界、waving→waiting、jumping→idle、jumping→review、
   Review→Done 不重播 jumping、review 期间不凝视、Done→Review 重播 jumping、
-  idle 随机动作的阈值/选择/回退/打断与重置、悬停 jumping×3→idle、悬停覆盖凝视、
+  idle 随机动作的阈值/选择/回退/打断与重置、悬停仅在 Row 0 触发、jumping×3→idle、
+  非 idle 行期间悬停无效、悬停覆盖凝视、
   拖拽优先、Done 凝视的 30 秒延迟、60 秒窗口开闭与 Done 中断重置、
   jumping 不被凝视跳过、离开凝视回坐姿、8 个基本方向、16 格取整、死区、
   无凝视行时回落 idle。

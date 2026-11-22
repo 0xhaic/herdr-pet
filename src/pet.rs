@@ -556,6 +556,12 @@ impl Animator {
         }
     }
 
+    /// Hover reactions start only while the idle row (Row 0) is showing; once
+    /// running, the hover state stays latched until the pointer leaves.
+    fn hover_reaction_allowed(&self) -> bool {
+        self.active == Active::Hover || (self.active == Active::Base && self.action == Action::Idle)
+    }
+
     /// Next absolute animation time that can change state without new input.
     /// Gaze and pointer hit-testing remain input-driven between these deadlines.
     pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
@@ -624,7 +630,8 @@ impl Animator {
             self.done_since_ms = None;
             self.done_gaze_ready = false;
         }
-        let active = match (input.dragging, input.hover, input.gaze) {
+        let hover = input.hover && self.hover_reaction_allowed();
+        let active = match (input.dragging, hover, input.gaze) {
             (Some(dir), _, _) => Active::Drag(dir),
             (None, true, _) => Active::Hover,
             (None, false, Some(_)) if self.can_look(input.mood, now_ms) => Active::Look,
@@ -807,6 +814,8 @@ mod tests {
             "Done's gaze window must open on time"
         );
 
+        // Hover only engages from Row 0, so settle back to idle first.
+        animator.update(0, input(Mood::Idle, None, None));
         animator.update(0, hover_input(Mood::Idle, None));
         assert_eq!(animator.next_deadline_ms(0), Some(140));
         assert_eq!(
@@ -1226,34 +1235,6 @@ mod tests {
     }
 
     #[test]
-    fn viewing_during_hover_still_settles_without_jumping() {
-        let mut animator = Animator::new(true);
-        assert_eq!(
-            animator.update(0, input(Mood::Review, None, None)),
-            Frame { row: 4, col: 0 }
-        );
-        assert_eq!(
-            animator.update(840, input(Mood::Review, None, None)),
-            Frame { row: 8, col: 0 }
-        );
-        // Hovering freezes the animator's mood; the seen flip arrives while
-        // the hover jumps are playing. Leaving hover must settle, not replay
-        // the completion jump.
-        assert_eq!(
-            animator.update(1_000, hover_input(Mood::Review, None)),
-            Frame { row: 4, col: 0 }
-        );
-        assert_eq!(
-            animator.update(1_150, hover_input(Mood::Done, None)),
-            Frame { row: 4, col: 1 }
-        );
-        assert_eq!(
-            animator.update(1_200, input(Mood::Done, None, None)),
-            Frame { row: 0, col: 0 }
-        );
-    }
-
-    #[test]
     fn a_new_unseen_done_after_seen_replays_jumping() {
         let mut animator = Animator::new(true);
         assert_eq!(
@@ -1461,24 +1442,88 @@ mod tests {
     fn hover_plays_three_jumps_then_idle() {
         let mut animator = Animator::new(true);
         assert_eq!(
-            animator.update(0, hover_input(Mood::Working, None)),
+            animator.update(0, hover_input(Mood::Idle, None)),
             Frame { row: 4, col: 0 }
         );
         assert_eq!(
-            animator.update(839, hover_input(Mood::Working, None)),
+            animator.update(839, hover_input(Mood::Idle, None)),
             Frame { row: 4, col: 4 }
         );
         assert_eq!(
-            animator.update(840, hover_input(Mood::Working, None)),
+            animator.update(840, hover_input(Mood::Idle, None)),
             Frame { row: 4, col: 0 }
         );
         assert_eq!(
-            animator.update(2520, hover_input(Mood::Working, None)),
+            animator.update(2520, hover_input(Mood::Idle, None)),
             Frame { row: 0, col: 0 }
         );
         assert_eq!(
-            animator.update(4200, hover_input(Mood::Working, None)),
+            animator.update(4200, hover_input(Mood::Idle, None)),
             Frame { row: 0, col: 1 }
+        );
+    }
+
+    #[test]
+    fn hover_only_triggers_from_the_idle_row() {
+        // Working: the running loop ignores the pointer.
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, input(Mood::Working, None, None)),
+            Frame { row: 7, col: 0 }
+        );
+        assert_eq!(
+            animator.update(100, hover_input(Mood::Working, None)),
+            Frame { row: 7, col: 0 }
+        );
+        assert_eq!(
+            animator.update(240, hover_input(Mood::Working, None)),
+            Frame { row: 7, col: 2 }
+        );
+
+        // Review is a standing loop as well.
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, input(Mood::Review, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 0 }
+        );
+        assert_eq!(
+            animator.update(900, hover_input(Mood::Review, None)),
+            Frame { row: 8, col: 0 }
+        );
+
+        // The Done entry jump must hand over to Row 0 before hover can start.
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, input(Mood::Done, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(150, hover_input(Mood::Done, None)),
+            Frame { row: 4, col: 1 }
+        );
+        assert_eq!(
+            animator.update(840, hover_input(Mood::Done, None)),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(856, hover_input(Mood::Done, None)),
+            Frame { row: 4, col: 0 }
+        );
+
+        // Gaze rows are not Row 0 either.
+        let mut animator = Animator::new(true);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+        assert_eq!(
+            animator.update(0, input(Mood::Idle, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+        assert_eq!(
+            animator.update(16, hover_input(Mood::Idle, Some(cell))),
+            Frame { row: 9, col: 4 }
         );
     }
 

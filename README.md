@@ -44,7 +44,9 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后进入 review 站立
   （Herdr 未标记已读时循环，查看后回到坐姿）、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
-- **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
+- **鼠标悬停**：仅当宠物正在播放 idle 动画（Row 0）时，悬停才播放 3 次跳跃后坐姿
+  待机；working、blocked、review、done 入场、failed、拖拽或凝视期间悬停无反应。
+  移开后恢复当前状态。
 - **鼠标凝视**：空闲时、以及 done 连续保持 30–90 秒的凝视窗口内（未悬停）宠物看向
   鼠标方向（16 个方向，需素材包含 look 行）；done 窗口结束后回到 idle 坐姿。
   done 前 30 秒与窗口结束后不响应凝视；未查看的 done 在 review 站立期间不凝视，
@@ -186,14 +188,14 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | error | failed（循环） |
 | idle | idle（循环）；连续 idle 15–30 秒随机 waving / jumping 一次后回到 idle |
 | 拖动中 | running-left / running-right |
-| 鼠标悬停 | jumping ×3 → idle；覆盖除拖拽外的状态 |
+| 鼠标悬停（仅 Row 0） | jumping ×3 → idle；其它动画行/状态期间不触发 |
 | idle / done 30–90 秒 + 鼠标 | look 行 9/10，按 16 方向选列 |
 
 只统计有 agent 状态的本机终端；普通 zsh/bash 等无状态终端按 idle 处理。
 herdr-core 清除终端状态时（例如 agent 退出、root shell 回到前台），宠物立即回到 idle。
 
 提醒只在状态**变化沿**触发：进入 blocked 或 done 时提醒，初始快照不提醒；
-拖拽、凝视或悬停会打断 idle 计时与随机动作。
+拖拽、凝视会打断 idle 计时与随机动作；悬停仅在 idle 行触发，只打断 idle 计时。
 
 ## 宠物素材
 
