@@ -277,10 +277,6 @@ struct App {
     /// Window size, scale, and layout the native views were last fitted to.
     overlay_key: Option<(u32, u32, u64, ChatLayout)>,
     last_chat_text: Option<ChatText>,
-    /// A tray size change saved the new layout before AppKit resized the
-    /// window; save again once the frame has landed (macOS keeps the
-    /// bottom-left fixed, so the window top moves).
-    save_after_resize: bool,
 }
 
 impl App {
@@ -328,7 +324,6 @@ impl App {
             overlay: None,
             overlay_key: None,
             last_chat_text: None,
-            save_after_resize: false,
         }
     }
 
@@ -779,19 +774,7 @@ impl App {
                         self.next_tick = Instant::now();
                     }
                 }
-                Action::NextPet => self.next_pet(),
                 Action::Settings => self.open_panel(),
-                Action::Bigger => self.set_size(self.config.size * 1.25),
-                Action::Smaller => self.set_size(self.config.size / 1.25),
-                Action::ToggleClickThrough => {
-                    self.set_click_through(!self.config.click_through);
-                }
-                Action::ToggleNotifications => {
-                    self.set_notifications(!self.config.notifications);
-                }
-                Action::ToggleNotificationSound => {
-                    self.set_notification_sound(!self.config.notification_sound);
-                }
                 Action::About => platform::show_about(),
                 Action::Quit => {
                     self.save_config();
@@ -859,18 +842,12 @@ impl App {
 
     fn set_notifications(&mut self, enabled: bool) {
         self.config.notifications = enabled;
-        if let Some(tray) = &self.tray {
-            tray.set_notifications(enabled);
-        }
         self.save_config();
         self.sync_panel();
     }
 
     fn set_notification_sound(&mut self, enabled: bool) {
         self.config.notification_sound = enabled;
-        if let Some(tray) = &self.tray {
-            tray.set_notification_sound(enabled);
-        }
         self.save_config();
         self.sync_panel();
     }
@@ -885,9 +862,6 @@ impl App {
 
     fn set_click_through(&mut self, enabled: bool) {
         self.config.click_through = enabled;
-        if let Some(tray) = &self.tray {
-            tray.set_click_through(enabled);
-        }
         if enabled {
             self.dragging = None;
         }
@@ -903,15 +877,6 @@ impl App {
         self.apply_size(height);
         self.sync_panel();
         self.schedule_save();
-    }
-
-    fn set_size(&mut self, height: f64) {
-        self.apply_size(height);
-        if self.window.is_some() {
-            self.save_after_resize = true;
-        }
-        self.save_config();
-        self.sync_panel();
     }
 
     fn apply_size(&mut self, height: f64) {
@@ -932,10 +897,10 @@ impl App {
         self.schedule_save();
     }
 
-    fn select_pet(&mut self, index: usize) -> bool {
+    fn select_pet(&mut self, index: usize) {
         let Some(dir) = self.pets.get(index) else {
             self.sync_panel();
-            return false;
+            return;
         };
         match pet::load_pet(dir) {
             Ok(next) => {
@@ -951,24 +916,10 @@ impl App {
                 self.next_tick = Instant::now();
                 self.save_config();
                 self.sync_panel();
-                true
             }
             Err(error) => {
-                eprintln!("herdr-pet: skipping {}: {error:#}", dir.display());
+                eprintln!("herdr-pet: cannot load {}: {error:#}", dir.display());
                 self.sync_panel();
-                false
-            }
-        }
-    }
-
-    fn next_pet(&mut self) {
-        if self.pets.is_empty() {
-            return;
-        }
-        for offset in 1..=self.pets.len() {
-            let index = (self.pet_index + offset) % self.pets.len();
-            if self.select_pet(index) {
-                return;
             }
         }
     }
@@ -1030,11 +981,7 @@ impl ApplicationHandler for App {
                 return;
             }
         }
-        match tray::Tray::new(
-            self.config.notifications,
-            self.config.notification_sound,
-            self.config.click_through,
-        ) {
+        match tray::Tray::new() {
             Ok(tray) => self.tray = Some(tray),
             Err(error) => eprintln!("herdr-pet: tray unavailable: {error:#}"),
         }
@@ -1070,10 +1017,6 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
-                }
-                if self.save_after_resize {
-                    self.save_after_resize = false;
-                    self.save_config();
                 }
                 self.force_redraw = true;
                 self.next_tick = Instant::now();
