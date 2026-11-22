@@ -216,61 +216,156 @@ fn mood_for(status: Option<AgentStatus>) -> Mood {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Drag {
     start_mouse: (f64, f64),
     last_mouse: (f64, f64),
     start_window: PhysicalPosition<i32>,
     dir: DragDir,
-    /// Screen area the pet is confined to for this drag, fixed at its start.
-    bounds: Option<ScreenArea>,
-    /// Window scale the bounds and drag offsets are expressed in.
+    /// Usable screen areas captured at drag start; the pet may cross them.
+    areas: Vec<Rect>,
+    /// Window scale the areas and drag offsets are expressed in.
     scale: f64,
 }
 
-/// Screen area in physical pixels with a top-left origin, matching winit's
-/// monitor and window coordinates.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ScreenArea {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+/// Usable area of `monitor`: the screen with its top edge below the menu bar.
+/// The bubble and button may hang outside a screen; only the pet is bounded.
+fn screen_area(monitor: &MonitorHandle) -> Rect {
+    let origin = monitor.position();
+    let size = monitor.size();
+    let top = f64::from(origin.y) + platform::menu_bar_height(monitor);
+    Rect {
+        x: f64::from(origin.x),
+        y: top,
+        w: f64::from(size.width),
+        h: (f64::from(origin.y) + f64::from(size.height) - top).max(0.0),
+    }
 }
 
-impl ScreenArea {
-    /// The area of `monitor` with its top edge below the menu bar.
-    fn of(monitor: &MonitorHandle) -> Self {
-        let origin = monitor.position();
-        let size = monitor.size();
-        let top = f64::from(origin.y) + platform::menu_bar_height(monitor);
-        Self {
-            x: f64::from(origin.x),
-            y: top,
-            width: f64::from(size.width),
-            height: (f64::from(origin.y) + f64::from(size.height) - top).max(0.0),
+/// Move a window top-left so the pet sprite stays on screen. A sprite fully
+/// covered by the screen areas keeps its position, so dragging across
+/// adjacent screens is smooth; otherwise it is clamped into the screen
+/// holding its centre.
+fn clamp_pet_to_screens(
+    window: PhysicalPosition<i32>,
+    pet: Rect,
+    scale: f64,
+    areas: &[Rect],
+) -> PhysicalPosition<i32> {
+    if areas.is_empty() {
+        return window;
+    }
+    let offset = (pet.x * scale, pet.y * scale);
+    let target = Rect {
+        x: f64::from(window.x) + offset.0,
+        y: f64::from(window.y) + offset.1,
+        w: pet.w * scale,
+        h: pet.h * scale,
+    };
+    if covered_by_any(target, areas) {
+        return window;
+    }
+    let Some(area) = screen_for(target, areas) else {
+        return window;
+    };
+    PhysicalPosition::new(
+        (clamp_axis(target.x, area.x, area.x + area.w - target.w) - offset.0).round() as i32,
+        (clamp_axis(target.y, area.y, area.y + area.h - target.h) - offset.1).round() as i32,
+    )
+}
+
+/// Whether every point of `rect` lies inside the union of `areas`.
+fn covered_by_any(rect: Rect, areas: &[Rect]) -> bool {
+    let mut uncovered = vec![rect];
+    for area in areas {
+        uncovered = uncovered
+            .into_iter()
+            .flat_map(|piece| subtract_rect(piece, *area))
+            .collect();
+        if uncovered.is_empty() {
+            return true;
         }
     }
+    false
+}
 
-    /// Move a window top-left so the pet sprite stays inside this area.
-    /// When the pet is larger than the area, its top-left edge wins.
-    fn clamp_window(
-        self,
-        position: PhysicalPosition<i32>,
-        pet: Rect,
-        scale: f64,
-    ) -> PhysicalPosition<i32> {
-        let origin_x = pet.x * scale;
-        let origin_y = pet.y * scale;
-        let min_x = (self.x - origin_x).ceil();
-        let max_x = (self.x + self.width - pet.w * scale - origin_x).floor();
-        let min_y = (self.y - origin_y).ceil();
-        let max_y = (self.y + self.height - pet.h * scale - origin_y).floor();
-        PhysicalPosition::new(
-            clamp_axis(f64::from(position.x), min_x, max_x) as i32,
-            clamp_axis(f64::from(position.y), min_y, max_y) as i32,
-        )
+/// `rect` minus `hole`, split into at most four rectangles.
+fn subtract_rect(rect: Rect, hole: Rect) -> Vec<Rect> {
+    let x0 = rect.x.max(hole.x);
+    let y0 = rect.y.max(hole.y);
+    let x1 = (rect.x + rect.w).min(hole.x + hole.w);
+    let y1 = (rect.y + rect.h).min(hole.y + hole.h);
+    if x0 >= x1 || y0 >= y1 {
+        return vec![rect];
     }
+    let mut parts = Vec::new();
+    if rect.y < y0 {
+        parts.push(Rect {
+            x: rect.x,
+            y: rect.y,
+            w: rect.w,
+            h: y0 - rect.y,
+        });
+    }
+    if y1 < rect.y + rect.h {
+        parts.push(Rect {
+            x: rect.x,
+            y: y1,
+            w: rect.w,
+            h: rect.y + rect.h - y1,
+        });
+    }
+    if rect.x < x0 {
+        parts.push(Rect {
+            x: rect.x,
+            y: y0,
+            w: x0 - rect.x,
+            h: y1 - y0,
+        });
+    }
+    if x1 < rect.x + rect.w {
+        parts.push(Rect {
+            x: x1,
+            y: y0,
+            w: rect.x + rect.w - x1,
+            h: y1 - y0,
+        });
+    }
+    parts
+}
+
+/// Screen area holding the pet's centre, else the one it overlaps most,
+/// else the nearest.
+fn screen_for(pet: Rect, areas: &[Rect]) -> Option<Rect> {
+    let center = pet.center();
+    if let Some(area) = areas.iter().find(|area| area.contains(center.0, center.1)) {
+        return Some(*area);
+    }
+    let best = areas
+        .iter()
+        .copied()
+        .max_by(|a, b| overlap_area(pet, *a).total_cmp(&overlap_area(pet, *b)))?;
+    if overlap_area(pet, best) > 0.0 {
+        return Some(best);
+    }
+    areas
+        .iter()
+        .copied()
+        .min_by(|a, b| distance_sq(pet, *a).total_cmp(&distance_sq(pet, *b)))
+}
+
+/// Overlapping area of two rectangles.
+fn overlap_area(a: Rect, b: Rect) -> f64 {
+    let w = (a.x + a.w).min(b.x + b.w) - a.x.max(b.x);
+    let h = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
+    if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
+}
+
+/// Squared distance between two rectangles (0 when they touch or overlap).
+fn distance_sq(a: Rect, b: Rect) -> f64 {
+    let dx = (b.x - (a.x + a.w)).max(a.x - (b.x + b.w)).max(0.0);
+    let dy = (b.y - (a.y + a.h)).max(a.y - (b.y + b.h)).max(0.0);
+    dx * dx + dy * dy
 }
 
 /// Clamp to an inclusive range, pinning to `min` when the range is empty.
@@ -280,29 +375,6 @@ fn clamp_axis(value: f64, min: f64, max: f64) -> f64 {
     } else {
         min
     }
-}
-
-/// Physical pixel position of the pet sprite's centre for a window top-left.
-fn pet_center(position: PhysicalPosition<i32>, pet: Rect, scale: f64) -> (f64, f64) {
-    (
-        f64::from(position.x) + (pet.x + pet.w / 2.0) * scale,
-        f64::from(position.y) + (pet.y + pet.h / 2.0) * scale,
-    )
-}
-
-/// First monitor whose full area contains `point`.
-fn monitor_at(
-    mut monitors: impl Iterator<Item = MonitorHandle>,
-    point: (f64, f64),
-) -> Option<MonitorHandle> {
-    monitors.find(|monitor| {
-        let origin = monitor.position();
-        let size = monitor.size();
-        point.0 >= f64::from(origin.x)
-            && point.0 < f64::from(origin.x) + f64::from(size.width)
-            && point.1 >= f64::from(origin.y)
-            && point.1 < f64::from(origin.y) + f64::from(size.height)
-    })
 }
 
 fn step_dir(current: DragDir, dx: f64) -> DragDir {
@@ -691,20 +763,17 @@ impl App {
             return;
         };
         if let Ok(position) = window.outer_position() {
-            let scale = window.scale_factor();
-            let pet = self.chat_layout.pet;
-            let monitor = monitor_at(
-                window.available_monitors(),
-                pet_center(position, pet, scale),
-            )
-            .or_else(|| window.current_monitor());
+            let areas = window
+                .available_monitors()
+                .map(|monitor| screen_area(&monitor))
+                .collect();
             self.dragging = Some(Drag {
                 start_mouse: pointer,
                 last_mouse: pointer,
                 start_window: position,
                 dir: DragDir::Right,
-                bounds: monitor.map(|monitor| ScreenArea::of(&monitor)),
-                scale,
+                areas,
+                scale: window.scale_factor(),
             });
             self.click_candidate = Some(pointer);
             self.set_cursor_hittest(true);
@@ -712,7 +781,7 @@ impl App {
     }
 
     fn update_drag(&mut self, pointer: Option<(f64, f64)>) {
-        let Some(mut drag) = self.dragging else {
+        let Some(mut drag) = self.dragging.clone() else {
             return;
         };
         let Some(pointer) = pointer else {
@@ -732,13 +801,12 @@ impl App {
         drag.dir = step_dir(drag.dir, pointer.0 - drag.last_mouse.0);
         drag.last_mouse = pointer;
         if let Some(window) = self.window.clone() {
-            let mut position = PhysicalPosition::new(
+            let target = PhysicalPosition::new(
                 (drag.start_window.x as f64 + dx).round() as i32,
                 (drag.start_window.y as f64 + dy).round() as i32,
             );
-            if let Some(bounds) = drag.bounds {
-                position = bounds.clamp_window(position, self.chat_layout.pet, drag.scale);
-            }
+            let position =
+                clamp_pet_to_screens(target, self.chat_layout.pet, drag.scale, &drag.areas);
             window.set_outer_position(position);
         }
         self.dragging = Some(drag);
@@ -830,7 +898,7 @@ impl App {
         self.update_drag(pointer);
         let gaze = snapshot.and_then(|snapshot| self.gaze(snapshot, pointer));
         let hover = self.hovered(local);
-        let dragging = self.dragging.map(|drag| drag.dir);
+        let dragging = self.dragging.as_ref().map(|drag| drag.dir);
         let input = AnimInput {
             mood: mood_for(self.mood),
             dragging,
@@ -1373,68 +1441,153 @@ mod tests {
         assert!(!chat_ui_available(false, true));
     }
 
-    #[test]
-    fn pet_drag_is_clamped_inside_the_screen_below_the_menu_bar() {
-        let area = ScreenArea {
-            x: 0.0,
-            y: 25.0,
-            width: 1440.0,
-            height: 875.0,
-        };
-        let pet = Rect {
+    fn pet_in_window() -> Rect {
+        Rect {
             x: 120.0,
             y: 88.0,
             w: 96.0,
             h: 104.0,
+        }
+    }
+
+    fn pet_top_left(position: PhysicalPosition<i32>, pet: Rect, scale: f64) -> (f64, f64) {
+        (
+            f64::from(position.x) + pet.x * scale,
+            f64::from(position.y) + pet.y * scale,
+        )
+    }
+
+    #[test]
+    fn pet_drag_is_clamped_inside_the_screen_below_the_menu_bar() {
+        let area = Rect {
+            x: 0.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
         };
-        let pet_top_left = |position: PhysicalPosition<i32>, scale: f64| {
-            (
-                f64::from(position.x) + pet.x * scale,
-                f64::from(position.y) + pet.y * scale,
-            )
-        };
+        let pet = pet_in_window();
+        let areas = [area];
 
         // The pet never enters the menu bar, even when dragged far past it.
-        let top_left = area.clamp_window(PhysicalPosition::new(-5000, -5000), pet, 2.0);
-        assert_eq!(pet_top_left(top_left, 2.0), (0.0, 25.0));
+        let top_left = clamp_pet_to_screens(PhysicalPosition::new(-5000, -5000), pet, 2.0, &areas);
+        assert_eq!(pet_top_left(top_left, pet, 2.0), (0.0, 25.0));
 
         // Nor does it leave the right or bottom edge.
-        let bottom_right = area.clamp_window(PhysicalPosition::new(5000, 5000), pet, 2.0);
+        let bottom_right =
+            clamp_pet_to_screens(PhysicalPosition::new(5000, 5000), pet, 2.0, &areas);
         assert_eq!(
-            pet_top_left(bottom_right, 2.0),
+            pet_top_left(bottom_right, pet, 2.0),
             (f64::from(1440 - 96 * 2), f64::from(25 + 875 - 104 * 2))
         );
 
         // Positions already inside the screen are left alone.
         let inside = PhysicalPosition::new(500, 300);
-        assert_eq!(area.clamp_window(inside, pet, 2.0), inside);
+        assert_eq!(clamp_pet_to_screens(inside, pet, 2.0, &areas), inside);
 
         // Non-Retina screens use the same rules.
-        let standard = area.clamp_window(PhysicalPosition::new(5000, 5000), pet, 1.0);
+        let standard = clamp_pet_to_screens(PhysicalPosition::new(5000, 5000), pet, 1.0, &areas);
         assert_eq!(
-            pet_top_left(standard, 1.0),
+            pet_top_left(standard, pet, 1.0),
             (f64::from(1440 - 96), f64::from(25 + 875 - 104))
         );
     }
 
     #[test]
-    fn pet_clamp_does_not_panic_when_the_pet_is_larger_than_the_screen() {
-        let tiny = ScreenArea {
+    fn pet_drag_crosses_adjacent_screens_without_a_jump() {
+        let left = Rect {
             x: 0.0,
             y: 25.0,
-            width: 100.0,
-            height: 80.0,
+            w: 1440.0,
+            h: 875.0,
         };
-        let pet = Rect {
-            x: 120.0,
-            y: 88.0,
-            w: 96.0,
-            h: 104.0,
+        let right = Rect {
+            x: 1440.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
         };
+        let areas = [left, right];
+        let pet = pet_in_window();
+
+        // The sprite straddles the shared edge; both screens cover it.
+        let straddling = PhysicalPosition::new(1280, 500);
+        assert_eq!(pet_top_left(straddling, pet, 1.0), (1400.0, 588.0));
         assert_eq!(
-            tiny.clamp_window(PhysicalPosition::new(500, 300), pet, 2.0),
-            PhysicalPosition::new(-240, -151)
+            clamp_pet_to_screens(straddling, pet, 1.0, &areas),
+            straddling
         );
+
+        // Beyond the outer edge it stops at the right screen's edge.
+        let far_right = clamp_pet_to_screens(PhysicalPosition::new(5000, 500), pet, 1.0, &areas);
+        assert_eq!(
+            pet_top_left(far_right, pet, 1.0),
+            (f64::from(1440 + 1440 - 96), 588.0)
+        );
+    }
+
+    #[test]
+    fn pet_drag_does_not_enter_the_gap_between_screens() {
+        let left = Rect {
+            x: 0.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
+        };
+        let right = Rect {
+            x: 2000.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
+        };
+        let areas = [left, right];
+        let pet = pet_in_window();
+
+        // Sprite left at 1470 sits entirely in the 560 px gap; its centre is
+        // nearer the left screen, so it is clamped to that screen's edge.
+        let in_gap = PhysicalPosition::new(1350, 500);
+        let clamped = clamp_pet_to_screens(in_gap, pet, 1.0, &areas);
+        assert_eq!(
+            pet_top_left(clamped, pet, 1.0),
+            (f64::from(1440 - 96), 588.0)
+        );
+    }
+
+    #[test]
+    fn pet_drag_uses_the_menu_bar_of_the_screen_it_is_on() {
+        let primary = Rect {
+            x: 0.0,
+            y: 39.0,
+            w: 1800.0,
+            h: 1130.0,
+        };
+        let secondary = Rect {
+            x: 1800.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
+        };
+        let areas = [primary, secondary];
+        let pet = pet_in_window();
+
+        let on_primary = clamp_pet_to_screens(PhysicalPosition::new(300, -5000), pet, 1.0, &areas);
+        assert_eq!(pet_top_left(on_primary, pet, 1.0), (420.0, 39.0));
+
+        let on_secondary =
+            clamp_pet_to_screens(PhysicalPosition::new(2300, -100), pet, 1.0, &areas);
+        assert_eq!(pet_top_left(on_secondary, pet, 1.0), (2420.0, 25.0));
+    }
+
+    #[test]
+    fn pet_clamp_does_not_panic_when_the_pet_is_larger_than_the_screen() {
+        let tiny = Rect {
+            x: 0.0,
+            y: 25.0,
+            w: 100.0,
+            h: 80.0,
+        };
+        let pet = pet_in_window();
+        let clamped = clamp_pet_to_screens(PhysicalPosition::new(500, 300), pet, 2.0, &[tiny]);
+        assert_eq!(pet_top_left(clamped, pet, 2.0), (0.0, 25.0));
     }
 
     #[test]
