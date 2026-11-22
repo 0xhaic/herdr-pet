@@ -122,6 +122,10 @@ fn run(pet_spec: Option<String>, config: Config) -> Result<()> {
     {
         use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         builder.with_activation_policy(ActivationPolicy::Accessory);
+        // A desktop companion must not steal focus when it starts. Stage
+        // Manager would otherwise consume the first desktop click to dismiss
+        // the pet instead of revealing the most recently used app.
+        builder.with_activate_ignoring_other_apps(false);
     }
     let event_loop = builder.build().context("creating the event loop")?;
     let mut app = App::new(pet, receiver, attention, config);
@@ -1043,6 +1047,7 @@ impl ApplicationHandler for App {
             .unwrap_or_else(|| default_position(event_loop, &self.chat_layout));
         let attributes = Window::default_attributes()
             .with_title("herdr-pet")
+            .with_active(false)
             .with_inner_size(LogicalSize::new(width, height))
             .with_position(position)
             .with_decorations(false)
