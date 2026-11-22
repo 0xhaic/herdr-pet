@@ -797,6 +797,7 @@ impl App {
         }
         if let Some(overlay) = &self.overlay {
             overlay.set_text(&text.title, &text.subtitle);
+            overlay.set_status(text.status);
             let icon = text
                 .icon
                 .and_then(|icon| herdr_app::icon_path(icon.file).map(|path| (path, icon.tint)));

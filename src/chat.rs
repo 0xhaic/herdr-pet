@@ -203,6 +203,8 @@ pub struct ChatText {
     pub subtitle: String,
     /// Agent icon before the title; None for the no-agent placeholder.
     pub icon: Option<AgentIcon>,
+    /// State glyph before the subtitle; None for the no-agent placeholder.
+    pub status: Option<AgentStatus>,
 }
 
 /// Two lines for the bubble: the focused agent's task title and its latest
@@ -222,13 +224,28 @@ pub fn chat_text(agent: Option<&TerminalAgent>) -> ChatText {
                 title,
                 subtitle,
                 icon: Some(agent_icon(agent.app.as_deref(), agent.name.as_deref())),
+                status: Some(agent.status.unwrap_or(AgentStatus::Idle)),
             }
         }
         None => ChatText {
             title: "暂无任务".to_owned(),
             subtitle: "等待 agent 状态".to_owned(),
             icon: None,
+            status: None,
         },
+    }
+}
+
+/// SF Symbol shown before the subtitle for each state; the no-agent
+/// placeholder gets a neutral dots glyph.
+pub fn status_symbol(status: Option<AgentStatus>) -> &'static str {
+    match status {
+        None => "ellipsis.circle",
+        Some(AgentStatus::Idle) => "moon.zzz",
+        Some(AgentStatus::Working) => "progress.indicator",
+        Some(AgentStatus::Blocked) => "hand.raised",
+        Some(AgentStatus::Done) => "checkmark.circle",
+        Some(AgentStatus::Error) => "xmark.circle",
     }
 }
 
@@ -385,7 +402,8 @@ mod tests {
             ChatText {
                 title: "t2 title".to_owned(),
                 subtitle: "Permission needed".to_owned(),
-                icon: Some(GENERIC_AGENT_ICON)
+                icon: Some(GENERIC_AGENT_ICON),
+                status: Some(AgentStatus::Blocked),
             }
         );
     }
@@ -401,9 +419,23 @@ mod tests {
             ChatText {
                 title: "暂无任务".to_owned(),
                 subtitle: "等待 agent 状态".to_owned(),
-                icon: None
+                icon: None,
+                status: None
             }
         );
+    }
+
+    #[test]
+    fn status_symbols_cover_every_state_and_placeholder() {
+        assert_eq!(status_symbol(None), "ellipsis.circle");
+        assert_eq!(status_symbol(Some(AgentStatus::Idle)), "moon.zzz");
+        assert_eq!(
+            status_symbol(Some(AgentStatus::Working)),
+            "progress.indicator"
+        );
+        assert_eq!(status_symbol(Some(AgentStatus::Blocked)), "hand.raised");
+        assert_eq!(status_symbol(Some(AgentStatus::Done)), "checkmark.circle");
+        assert_eq!(status_symbol(Some(AgentStatus::Error)), "xmark.circle");
     }
 
     #[test]

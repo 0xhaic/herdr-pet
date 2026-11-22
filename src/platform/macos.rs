@@ -174,7 +174,10 @@ mod overlay {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
 
-    use crate::chat::{ARROW_RESERVED, BUBBLE_HEIGHT, BUBBLE_WIDTH, BUTTON_SIZE, ChatLayout};
+    use crate::chat::{
+        ARROW_RESERVED, BUBBLE_HEIGHT, BUBBLE_WIDTH, BUTTON_SIZE, ChatLayout, status_symbol,
+    };
+    use crate::status::AgentStatus;
 
     const TITLE_INSET_TOP: f64 = 12.0;
     const TEXT_INSET_X: f64 = 16.0;
@@ -221,6 +224,7 @@ mod overlay {
         title: Retained<NSTextField>,
         subtitle: Retained<NSTextField>,
         agent_icon: Retained<NSImageView>,
+        status_icon: Retained<NSImageView>,
         prev_arrow: Retained<NSImageView>,
         next_arrow: Retained<NSImageView>,
         button: Retained<NSVisualEffectView>,
@@ -285,6 +289,11 @@ mod overlay {
             agent_icon.setContentTintColor(Some(&NSColor::textColor()));
             container.addSubview(&agent_icon);
 
+            // The state glyph sits before the subtitle, in the same left column
+            // as the agent icon.
+            let status_icon = NSImageView::new(mtm);
+            container.addSubview(&status_icon);
+
             // Agent pager arrows live inside the bubble's trailing end and
             // stay fully opaque like the labels.
             let prev_arrow = pager_arrow(mtm, "chevron.left");
@@ -315,6 +324,7 @@ mod overlay {
                 title,
                 subtitle,
                 agent_icon,
+                status_icon,
                 prev_arrow,
                 next_arrow,
                 button,
@@ -327,6 +337,7 @@ mod overlay {
                 frames: Cell::new(None),
                 icon_key: RefCell::new(None),
             };
+            overlay.set_status(None);
             overlay.set_visible(open, true);
             Some(overlay)
         }
@@ -375,17 +386,25 @@ mod overlay {
                 NSPoint::new(bubble.origin.x + text_left, title_y),
                 NSSize::new(text_width, TEXT_LINE_HEIGHT),
             ));
+            // The subtitle keeps a glyph column even when the agent icon on
+            // the title row is missing, so both text lines stay aligned.
+            let subtitle_left = TEXT_INSET_X + AGENT_ICON_SIZE + AGENT_ICON_GAP;
+            let subtitle_y = title_y - TEXT_LINE_GAP - TEXT_LINE_HEIGHT;
             self.subtitle.setFrame(NSRect::new(
-                NSPoint::new(
-                    bubble.origin.x + text_left,
-                    title_y - TEXT_LINE_GAP - TEXT_LINE_HEIGHT,
-                ),
-                NSSize::new(text_width, TEXT_LINE_HEIGHT),
+                NSPoint::new(bubble.origin.x + subtitle_left, subtitle_y),
+                NSSize::new(BUBBLE_WIDTH - subtitle_left - text_right, TEXT_LINE_HEIGHT),
             ));
             self.agent_icon.setFrame(NSRect::new(
                 NSPoint::new(
                     bubble.origin.x + TEXT_INSET_X,
                     title_y + (TEXT_LINE_HEIGHT - AGENT_ICON_SIZE) / 2.0,
+                ),
+                NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE),
+            ));
+            self.status_icon.setFrame(NSRect::new(
+                NSPoint::new(
+                    bubble.origin.x + TEXT_INSET_X,
+                    subtitle_y + (TEXT_LINE_HEIGHT - AGENT_ICON_SIZE) / 2.0,
                 ),
                 NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE),
             ));
@@ -444,6 +463,26 @@ mod overlay {
             self.apply_visibility();
         }
 
+        /// Set the state glyph on the subtitle row. Semantic colors keep the
+        /// state scannable while the text stays the agent's own message.
+        pub fn set_status(&self, status: Option<AgentStatus>) {
+            let color = match status {
+                Some(AgentStatus::Working) => NSColor::systemBlueColor(),
+                Some(AgentStatus::Blocked) => NSColor::systemOrangeColor(),
+                Some(AgentStatus::Done) => NSColor::systemGreenColor(),
+                Some(AgentStatus::Error) => NSColor::systemRedColor(),
+                Some(AgentStatus::Idle) | None => NSColor::secondaryLabelColor(),
+            };
+            self.status_icon.setContentTintColor(Some(&color));
+            if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str(status_symbol(status)),
+                None,
+            ) {
+                image.setSize(NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE));
+                self.status_icon.setImage(Some(&image));
+            }
+        }
+
         pub fn set_opacity(&self, opacity: f64) {
             self.bubble.setAlphaValue(opacity);
             self.button.setAlphaValue(opacity);
@@ -465,6 +504,7 @@ mod overlay {
             self.subtitle.setHidden(!bubble);
             self.agent_icon
                 .setHidden(!(bubble && self.icon_present.get()));
+            self.status_icon.setHidden(!bubble);
             let pager = bubble && self.pager_visible.get();
             self.prev_arrow.setHidden(!pager);
             self.next_arrow.setHidden(!pager);

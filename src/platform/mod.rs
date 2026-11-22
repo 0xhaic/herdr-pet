@@ -50,6 +50,8 @@ impl ChatOverlay {
 
     pub fn set_icon(&self, _icon: Option<(&std::path::Path, bool)>) {}
 
+    pub fn set_status(&self, _status: Option<crate::status::AgentStatus>) {}
+
     pub fn set_visible(&self, _bubble: bool, _button: bool) {}
 
     pub fn set_opacity(&self, _opacity: f64) {}

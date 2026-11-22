@@ -13,7 +13,10 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   （`status.msg`，缺省回退中文状态）。标题行文字前显示 agent 图标，取自 Herdr.app
   的 program 图标目录（`HERDR_APP_HOME/icons`）：已知 agent 使用对应品牌/单色图标，
   未知 agent 使用通用 agent 图标；Herdr.app 或图标文件不存在时自动不显示并恢复文字
-  宽度。宠物右下角的箭头按钮收起/展开，开关写入配置；气泡与箭头按钮共用同一套玻璃
+  宽度。第二行文字前显示状态图标（空闲 `moon.zzz`、工作中 `progress.indicator`、
+  等待输入 `hand.raised`、已完成 `checkmark.circle`、出错 `xmark.circle`，无 agent
+  时 `ellipsis.circle`），使用系统语义色：灰/蓝/橙/绿/红。宠物右下角的箭头按钮收起/
+  展开，开关写入配置；气泡与箭头按钮共用同一套玻璃
   样式和 `chat_opacity` 不透明度，默认 `0.7`；文字与箭头颜色随系统浅色/深色外观
   切换，避免亮色背景上的白字不可读。
 - **气泡内容优先级**：`blocked`/`error` → 未读 `done` → 最近状态变化的 `working`
