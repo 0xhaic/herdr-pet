@@ -21,7 +21,9 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   切换，避免亮色背景上的白字不可读。
 - **气泡内容优先级**：`blocked`/`error` → 未读 `done` → 最近状态变化的 `working`
   → 其它。同一档取时间最早（blocked/error、未读 done）；`working` 取最近一次状态
-  变化作为「最后一次交互」的近似（herdr 没有逐标签页交互时间）。宠物动画仍按
+  变化作为「最后一次交互」的近似（herdr 没有逐标签页交互时间）。同一档内，子
+  agent（`parent` 非空）排在其父 agent 前，因此 herdr 派发子 agent 后气泡与点击
+  都指向子 agent；父 agent 若处于更高档（如 blocked/error）仍优先。宠物动画仍按
   `Blocked > Error > Working > Done > Idle` 的聚合优先级，因此气泡和动画可能指向
   不同 agent。
 - **会话切换**：有多个会话需要气泡（`blocked` / `working` / `error` / 未读 `done`）
@@ -35,7 +37,10 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   强制弹出，直到 agent 被手动处理或该 done 被 Herdr 查看；此时若 Herdr 在前台则不
   显示箭头按钮。宠物本体始终保留。
 - **与 Herdr 跳转**：气泡可见时，左键点击气泡或宠物会拉起 Herdr 并跳到对应
-  会话；拖动宠物不会触发跳转。Herdr 在前台时聊天 UI 默认隐藏，点击宠物仍可跳转。
+  会话；子 agent（`parent` 非空）没有独立 pane，改用 `terminal.peek` 在其父会话
+  的 tab 上打开浮层窗口，peek 不可用时回退到父会话所在的 tab。拖动宠物不会触发
+  跳转。
+  Herdr 在前台时聊天 UI 默认隐藏，点击宠物仍可跳转。
 - **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后回到坐姿、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
 - **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
@@ -60,7 +65,8 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`），
   目录内包含 `pet.json` 与 `spritesheet.webp`；可在设置面板中改用其它宠物目录。
 - Herdr.app（可选）：前台判断使用 `NSWorkspace`，点击跳转通过
-  `herdr-app do agent.focus` 实现；气泡标题行的 agent 图标也读取 Herdr.app 的
+  `herdr-app do agent.focus`（普通 agent）或 `terminal.peek`（子 agent）实现；
+  气泡标题行的 agent 图标也读取 Herdr.app 的
   program 图标目录。未安装或找不到时宠物其余功能正常，图标隐藏，点击只会尝试
   打开 Herdr。
 

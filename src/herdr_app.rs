@@ -119,9 +119,22 @@ pub fn icon_path(file: &str) -> Option<PathBuf> {
     Some(app_home()?.join(file))
 }
 
+/// The command that shows `address`: sub-agents have no pane of their own, so
+/// `agent.focus` only lands on their parent's tab; peek opens their terminal
+/// over that tab instead.
+fn jump_command(sub_agent: bool) -> &'static str {
+    if sub_agent {
+        "terminal.peek"
+    } else {
+        "agent.focus"
+    }
+}
+
 /// Raise Herdr.app and show `address`, retrying while a freshly launched app
-/// finishes opening its window. Runs off the UI thread and never fails loudly.
-pub fn focus_terminal(address: String) {
+/// finishes opening its window. Sub-agents open as a peek over the parent's
+/// tab, falling back to the tab itself when peek is unavailable. Runs off the
+/// UI thread and never fails loudly.
+pub fn focus_terminal(address: String, sub_agent: bool) {
     if FOCUSING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -130,19 +143,9 @@ pub fn focus_terminal(address: String) {
         .spawn(move || {
             raise_app();
             if let Some(cli) = app_cli() {
-                let mut focused = false;
-                for _ in 0..FOCUS_ATTEMPTS {
-                    focused = Command::new(&cli)
-                        .args(["do", "agent.focus", "--terminal", &address])
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status()
-                        .is_ok_and(|status| status.success());
-                    if focused {
-                        break;
-                    }
-                    std::thread::sleep(FOCUS_RETRY_DELAY);
+                let mut focused = focus_with(&cli, jump_command(sub_agent), &address);
+                if !focused && sub_agent {
+                    focused = focus_with(&cli, "agent.focus", &address);
                 }
                 if !focused {
                     eprintln!("herdr-pet: cannot show {address} in Herdr.app");
@@ -154,6 +157,23 @@ pub fn focus_terminal(address: String) {
         eprintln!("herdr-pet: cannot start the Herdr.app jump thread");
         FOCUSING.store(false, Ordering::SeqCst);
     }
+}
+
+fn focus_with(cli: &Path, command: &str, address: &str) -> bool {
+    for _ in 0..FOCUS_ATTEMPTS {
+        let focused = Command::new(cli)
+            .args(["do", command, "--terminal", address])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if focused {
+            return true;
+        }
+        std::thread::sleep(FOCUS_RETRY_DELAY);
+    }
+    false
 }
 
 /// Raise Herdr.app without targeting a session (used when no agent is known).
@@ -182,6 +202,12 @@ fn app_cli() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sub_agents_jump_to_their_peek_window() {
+        assert_eq!(jump_command(true), "terminal.peek");
+        assert_eq!(jump_command(false), "agent.focus");
+    }
 
     #[test]
     fn parses_seen_addresses_from_attention() {

@@ -57,6 +57,10 @@ pub struct StatusRecord {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Terminal {
     pub address: String,
+    /// The terminal that started it (`hc run`); sub-agents are shown inside
+    /// their parent's tab without a pane of their own.
+    #[serde(default)]
+    pub parent: Option<String>,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -74,6 +78,8 @@ pub struct Terminal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalAgent {
     pub address: String,
+    /// The terminal that started it (`hc run`); set once at start.
+    pub parent: Option<String>,
     pub title: Option<String>,
     pub name: Option<String>,
     pub labels: BTreeMap<String, String>,
@@ -91,6 +97,7 @@ impl TerminalAgent {
     fn from_terminal(terminal: Terminal, updated_at: u64) -> Self {
         let Terminal {
             address,
+            parent,
             title,
             name,
             labels,
@@ -119,6 +126,7 @@ impl TerminalAgent {
             .map(str::to_owned);
         Self {
             address,
+            parent,
             title,
             name,
             labels,
@@ -129,6 +137,15 @@ impl TerminalAgent {
             status_ms,
             updated_at,
         }
+    }
+
+    /// Whether an agent started this terminal with `hc run`. Herdr shows such
+    /// terminals inside the parent's tab without a pane, so showing one means
+    /// peeking at it rather than focusing a tab.
+    pub fn is_sub_agent(&self) -> bool {
+        self.parent
+            .as_deref()
+            .is_some_and(|parent| !parent.is_empty())
     }
 
     /// The focused agent's latest action line, when the program reported one.
@@ -190,6 +207,52 @@ fn status_app(status: &Option<StatusRecord>) -> Option<String> {
         .map(|record| record.app.trim())
         .filter(|app| !app.is_empty())
         .map(str::to_owned)
+}
+
+/// The urgency group that decides whether a sub-agent may pass its parent.
+/// A parent in a higher group (blocked/error, unseen done) still comes first.
+fn focus_tier(agent: &TerminalAgent, unseen_done: &impl Fn(&str) -> bool) -> u8 {
+    match agent.status {
+        Some(AgentStatus::Blocked | AgentStatus::Error) => 0,
+        Some(AgentStatus::Done) if unseen_done(&agent.address) => 1,
+        Some(AgentStatus::Working) => 2,
+        _ => 3,
+    }
+}
+
+/// Move each sub-agent ahead of its parent when both are in the same urgency
+/// group, keeping every other relative order. Herdr dispatches sub-agents
+/// without a pane of their own, so they are the actionable target once a task
+/// is handed off. The loop settles chains (a sub-agent that started another).
+fn prefer_sub_agents(agents: &mut Vec<&TerminalAgent>, unseen_done: &impl Fn(&str) -> bool) {
+    loop {
+        let mut moved = false;
+        for index in 0..agents.len() {
+            let Some(parent) = agents[index]
+                .parent
+                .clone()
+                .filter(|parent| !parent.is_empty())
+            else {
+                continue;
+            };
+            let Some(parent_index) = agents.iter().position(|agent| agent.address == parent) else {
+                continue;
+            };
+            if parent_index >= index
+                || focus_tier(agents[parent_index], unseen_done)
+                    != focus_tier(agents[index], unseen_done)
+            {
+                continue;
+            }
+            let child = agents.remove(index);
+            agents.insert(parent_index, child);
+            moved = true;
+            break;
+        }
+        if !moved {
+            return;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +501,8 @@ impl StatusTable {
     ///
     /// The working agent's last status change is the best available proxy for
     /// "last interacted"; Herdr exposes no per-tab interaction timestamp.
+    /// Within one group, a sub-agent comes before the parent that started it,
+    /// so the bubble and click target the work Herdr dispatched.
     fn ordered_with(&self, unseen_done: &impl Fn(&str) -> bool) -> Vec<&TerminalAgent> {
         let last_working = self
             .terminals
@@ -460,7 +525,10 @@ impl StatusTable {
             })
             .collect();
         ordered.sort_by_key(|(_, rank, key)| (*rank, *key));
-        ordered.into_iter().map(|(agent, _, _)| agent).collect()
+        let mut ordered: Vec<&TerminalAgent> =
+            ordered.into_iter().map(|(agent, _, _)| agent).collect();
+        prefer_sub_agents(&mut ordered, unseen_done);
+        ordered
     }
 
     /// The agent the chat bubble shows by default: the first entry of the
@@ -779,6 +847,92 @@ mod tests {
         table.apply_event(parsed_event(created("t2", "t1")));
         assert_eq!(table.aggregate().blocked, 2);
         assert_eq!(table.aggregate().total, 2);
+    }
+
+    #[test]
+    fn terminal_parent_marks_sub_agents() {
+        let child = Terminal {
+            parent: Some("t1".to_owned()),
+            ..terminal("t2", "live", Some("working"))
+        };
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal("t1", "live", Some("working")), child]);
+        assert!(!table.terminals["t1"].is_sub_agent());
+        assert!(table.terminals["t2"].is_sub_agent());
+        assert_eq!(table.terminals["t2"].parent.as_deref(), Some("t1"));
+
+        // A created event carries the parent too, and status changes keep it.
+        table.apply_event(parse_event(&json!({
+            "type": "created",
+            "terminal": "t3",
+            "data": {
+                "address": "t3",
+                "parent": "t1",
+                "state": "live",
+                "status": {"state": "working"}
+            }
+        })));
+        table.apply_event(status_event("t3", "blocked"));
+        assert!(table.terminals["t3"].is_sub_agent());
+
+        // Core sends null for top-level terminals; an empty string is not one.
+        let top = Terminal {
+            parent: Some(String::new()),
+            ..terminal("t4", "live", Some("working"))
+        };
+        table.apply_snapshot(vec![top]);
+        assert!(!table.terminals["t4"].is_sub_agent());
+    }
+
+    #[test]
+    fn sub_agents_precede_their_parent_within_a_group() {
+        let with_ms = |address: &str, state: &str, status_ms: u64| {
+            let mut terminal = terminal(address, "live", Some(state));
+            terminal.status_ms = Some(status_ms);
+            terminal
+        };
+        let child_of = |mut terminal: Terminal, parent: &str| {
+            terminal.parent = Some(parent.to_owned());
+            terminal
+        };
+        let focus = |table: &StatusTable| {
+            table
+                .focus_with(|_| true)
+                .map(|agent| agent.address.clone())
+        };
+
+        // Both working: the parent has the latest status change, but the child
+        // still wins, so clicking the pet opens the dispatched work.
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            with_ms("t1", "working", 400),
+            child_of(with_ms("t2", "working", 300), "t1"),
+        ]);
+        assert_eq!(focus(&table), Some("t2".to_owned()));
+
+        // Both blocked: the child moves ahead of its parent too.
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            with_ms("t1", "blocked", 100),
+            child_of(with_ms("t2", "blocked", 200), "t1"),
+        ]);
+        assert_eq!(focus(&table), Some("t2".to_owned()));
+
+        // Both unseen done: same rule in the completion group.
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            with_ms("t1", "done", 10),
+            child_of(with_ms("t2", "done", 20), "t1"),
+        ]);
+        assert_eq!(focus(&table), Some("t2".to_owned()));
+
+        // A blocked parent stays ahead of a working child: urgency first.
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            with_ms("t1", "blocked", 100),
+            child_of(with_ms("t2", "working", 200), "t1"),
+        ]);
+        assert_eq!(focus(&table), Some("t1".to_owned()));
     }
 
     #[test]

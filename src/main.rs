@@ -768,7 +768,7 @@ impl App {
 
     fn focus_herdr_chat(&self) {
         match self.focus_agent() {
-            Some(agent) => herdr_app::focus_terminal(agent.address.clone()),
+            Some(agent) => herdr_app::focus_terminal(agent.address.clone(), agent.is_sub_agent()),
             None => herdr_app::raise_app_in_background(),
         }
     }

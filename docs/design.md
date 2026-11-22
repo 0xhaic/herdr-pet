@@ -188,7 +188,7 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
 按 `Terminal.address` 维护：
 
 ```text
-TerminalAgent { address, title, name, labels, live, status: Option<AgentStatus>, app, status_msg, status_ms }
+TerminalAgent { address, parent, title, name, labels, live, status: Option<AgentStatus>, app, status_msg, status_ms }
 AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先级
 ```
 
@@ -200,7 +200,9 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
 - 输出 `Aggregate { status: Option<AgentStatus>, blocked, error, done, working, total }`。
 - 聊天框的聚焦顺序（`ordered_with`）：只在 `live` 且 `status.is_some()` 的终端中
   排，分组为 1) blocked/error、2) 未读 done、3) 最近一次状态变化的 working、
-  4) 其它；同一组取最早状态时间（working 组例外，取最近）。`focus_with` 取首个；
+  4) 其它；同一组取最早状态时间（working 组例外，取最近）。同一档内子 agent
+  （`parent` 非空）排在其父 agent 前，使气泡与点击都指向 herdr 派发的子任务；
+  父 agent 处于更高档（如 blocked/error）时仍优先。`focus_with` 取首个；
   气泡内左右箭头使用 `focus_candidates_with`，即该顺序中当前需要气泡的子集
   （blocked/working/error、未读 done），首个即自动聚焦，其余供手动切换。
   `status_ms` 来自快照；状态事件使用接收时的墙上时钟，用于同一组的时间顺序。
@@ -220,7 +222,8 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
   - 文本优先级：`title` → `name` → `labels["where"]` → `address`。
 - 计数单位是 terminal address：父 agent 与子 agent（`parent` 非空）各算一个。
   herdr 的 agents 列表同样包含 sub-agent，因此聚合不做父子去重，只按地址去重。
-  单测锚点：父、子同时 blocked 时 `blocked == 2`。
+  单测锚点：父、子同时 blocked 时 `blocked == 2`；同档父子相邻时子 agent
+  先于父 agent，父 agent 处于更高档时仍优先。
 - herdr 语义：`done` 表示"你没看的时候完成了"；任一 Herdr 客户端查看后会转为
   `idle`。pet 只是事实订阅者，订阅是否触发该转换尚未实测，因此不要把 done→idle
   当作必然事件；宠物播放一次 jumping 提醒后回到 idle 坐姿，等待下一次状态变化。
@@ -517,8 +520,12 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
   文件不可读时 done 一直按未读处理。
 
 - 点击跳转：点气泡（按下即触发）或点宠物（释放且位移 ≤ 3 logical px）时，
-  捕获当前聚焦终端地址，后台线程先 `/usr/bin/open -b dev.herdr.app` 拉起/激活窗口，
-  再重试 `herdr-app do agent.focus --terminal <地址>`（25 × 200 ms，覆盖冷启动）。
+  捕获当前聚焦终端的地址与 `parent`（`parent` 非空即子 agent），后台线程先
+  `/usr/bin/open -b dev.herdr.app` 拉起/激活窗口。普通 agent 重试
+  `herdr-app do agent.focus --terminal <地址>`；子 agent 没有自己的 pane，
+  `agent.focus` 只会停在父会话的 tab，因此重试
+  `herdr-app do terminal.peek --terminal <地址>`，在父会话 tab 上打开子 agent
+  的浮层窗口，peek 失败时回退 `agent.focus`（25 × 200 ms，覆盖冷启动）。
   无聚焦 agent 时只拉起窗口。点击期间用原子标记避免重复跳转线程。
 - 应用路径通过 `NSWorkspace.URLForApplicationWithBundleIdentifier:` 定位
   `dev.herdr.app` 的可执行文件（兼作 `herdr-app` CLI）；找不到时无法跳转，宠物
@@ -526,7 +533,7 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 - 不再轮询 `herdr-app status`，也不解析 space/tab/agent；Herdr 前台时整个聊天 UI
   隐藏，与当前打开哪个 tab 无关。
 - 测试锚点：attention 的 seen 地址解析、`is_active_with` 的 done 分支、点击阈值
-  与可见性组合逻辑；子进程跳转路径不做单测。
+  与可见性组合逻辑、子 agent 的跳转命令映射；子进程跳转路径不做单测。
 
 ## 4. 错误处理与健壮性
 
@@ -611,9 +618,9 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
   吞掉。已在 macOS 实机验证模糊、圆角、Retina point 坐标、按钮切换与拖动。
 - **Herdr.app 前台判断**：主线程每 250 ms 查询一次 NSWorkspace，不启动子进程；
   Herdr 前台时整个聊天 UI 隐藏，不区分当前 tab。点击跳转使用官方
-  `herdr-app do agent.focus`，不读写其内部 socket；`agent.focus` 对隐藏终端/子 agent
-  的行为以 CLI 文档为准；冷启动超过 5 秒时跳转可能失败并记录日志。绝不停止或重启
-  用户的 Herdr/core。
+  `herdr-app do agent.focus` / `terminal.peek`，不读写其内部 socket；子 agent
+  在父会话 tab 上以 peek 浮层显示，peek 不可用时回退 `agent.focus`；冷启动超过
+  5 秒时跳转可能失败并记录日志。绝不停止或重启用户的 Herdr/core。
 - **Herdr 已读状态**：done 的 seen 读取 Herdr 内部 `view.json`（无公开 CLI），
   每 500 ms 读一次、约 20 KB；解析失败保留上次结果，首次失败按全部未读。Herdr
   未运行或文件不可读时 done 气泡会一直保留；这是「未查看不消失」的保守行为。
