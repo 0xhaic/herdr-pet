@@ -804,7 +804,7 @@ impl App {
                 }
             }
         }
-        if let Some(panel) = &self.panel {
+        if let Some(panel) = &mut self.panel {
             panel.show();
         }
     }

@@ -345,14 +345,17 @@ mod overlay {
 mod settings {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::ptr::NonNull;
     use std::sync::mpsc::{Receiver, Sender, channel};
 
+    use block2::RcBlock;
     use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
         NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
-        NSControlStateValueOn, NSFont, NSLineBreakMode, NSModalResponseOK, NSOpenPanel,
-        NSPopUpButton, NSSlider, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+        NSControlStateValueOn, NSEvent, NSEventMask, NSFont, NSLineBreakMode, NSModalResponseOK,
+        NSOpenPanel, NSPopUpButton, NSSlider, NSTextField, NSView, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -404,6 +407,7 @@ mod settings {
         /// NSControl does not retain its target, so the panel keeps it alive.
         path_chooser: Retained<PathChooser>,
         dir_events: Receiver<PanelAction>,
+        monitor: Option<OutsideClickMonitor>,
         last: UiState,
     }
 
@@ -536,6 +540,7 @@ mod settings {
                 chat_open,
                 path_chooser,
                 dir_events,
+                monitor: None,
                 last: UiState::default(),
             };
             panel.sync_pets(pets, selected, pets_dir, custom_dir);
@@ -543,7 +548,7 @@ mod settings {
             Some(panel)
         }
 
-        pub fn show(&self) {
+        pub fn show(&mut self) {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
             };
@@ -551,12 +556,20 @@ mod settings {
             // this the window cannot become key and the controls stay inert.
             NSApplication::sharedApplication(mtm).activate();
             self.window.makeKeyAndOrderFront(None);
+            if self.monitor.is_none() {
+                self.monitor = Some(OutsideClickMonitor::install(&self.window, mtm));
+            }
         }
 
         /// Changes the user made since the last poll. Controls without
         /// target/action still track their own state, so reading them is
         /// enough to support live sliders and toggles.
         pub fn poll(&mut self) -> Vec<PanelAction> {
+            // Closing via the title bar or an outside click must also release
+            // the event monitors; the next tick does that.
+            if self.monitor.is_some() && !self.window.isVisible() {
+                self.monitor = None;
+            }
             let mut actions = Vec::new();
             while let Ok(action) = self.dir_events.try_recv() {
                 actions.push(action);
@@ -685,6 +698,67 @@ mod settings {
         }
         let path = panel.URL()?.path()?;
         Some(PathBuf::from(path.to_string()))
+    }
+
+    /// Hides the settings window when a click lands outside it, mirroring the
+    /// About dialog. Modal panels (the directory picker, alerts) are exempt.
+    struct OutsideClickMonitor {
+        local: Option<Retained<AnyObject>>,
+        global: Option<Retained<AnyObject>>,
+    }
+
+    impl OutsideClickMonitor {
+        fn install(window: &Retained<NSWindow>, mtm: MainThreadMarker) -> Self {
+            let mask = NSEventMask::LeftMouseDown
+                | NSEventMask::RightMouseDown
+                | NSEventMask::OtherMouseDown;
+
+            let local_window = window.clone();
+            let local_handler: RcBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent> =
+                RcBlock::new(move |event: NonNull<NSEvent>| {
+                    // SAFETY: AppKit passes a live event for the handler's duration.
+                    let event_ref = unsafe { event.as_ref() };
+                    let inside = event_ref.window(mtm).is_some_and(|event_window| {
+                        std::ptr::eq(
+                            Retained::as_ptr(&event_window),
+                            Retained::as_ptr(&local_window),
+                        )
+                    });
+                    let modal = NSApplication::sharedApplication(mtm)
+                        .modalWindow()
+                        .is_some();
+                    if !inside && !modal {
+                        local_window.orderOut(None);
+                    }
+                    event.as_ptr()
+                });
+            // SAFETY: the handler returns the event unchanged.
+            let local = unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local_handler)
+            };
+
+            let global_window = window.clone();
+            let global_handler: RcBlock<dyn Fn(NonNull<NSEvent>)> =
+                RcBlock::new(move |_event: NonNull<NSEvent>| {
+                    global_window.orderOut(None);
+                });
+            let global =
+                NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global_handler);
+
+            Self { local, global }
+        }
+    }
+
+    impl Drop for OutsideClickMonitor {
+        fn drop(&mut self) {
+            for monitor in [self.local.take(), self.global.take()]
+                .into_iter()
+                .flatten()
+            {
+                // SAFETY: each token came from the matching add call above.
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
     }
 
     fn diff(previous: &UiState, current: &UiState) -> Vec<PanelAction> {
