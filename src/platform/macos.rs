@@ -12,6 +12,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 pub use overlay::ChatOverlay;
+pub use settings::SettingsPanel;
 
 const HERDR_APP_BUNDLE_ID: &str = "dev.herdr.app";
 
@@ -257,6 +258,10 @@ mod overlay {
             self.subtitle.setStringValue(&NSString::from_str(subtitle));
         }
 
+        pub fn set_opacity(&self, opacity: f64) {
+            self.bubble.setAlphaValue(opacity);
+        }
+
         /// Hide the bubble and/or the button. The chevron follows the bubble:
         /// down when expanded, up when collapsed or auto-hidden.
         pub fn set_visible(&self, bubble: bool, button: bool) {
@@ -326,6 +331,360 @@ mod overlay {
         label.setUsesSingleLineMode(true);
         label.setMaximumNumberOfLines(1);
         label
+    }
+}
+
+mod settings {
+    use objc2::rc::Retained;
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
+        NSControlStateValueOn, NSFont, NSPopUpButton, NSSlider, NSTextField, NSView, NSWindow,
+        NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    use crate::config::{Config, MAX_SIZE, MIN_SIZE};
+    use crate::platform::PanelAction;
+
+    const WIDTH: f64 = 320.0;
+    const HEIGHT: f64 = 330.0;
+    const PAD: f64 = 20.0;
+    const LABEL_WIDTH: f64 = 96.0;
+    const CONTROL_X: f64 = 116.0;
+    const CONTROL_WIDTH: f64 = WIDTH - CONTROL_X - PAD;
+    const ROW_HEIGHT: f64 = 24.0;
+    const PET_TOP: f64 = 20.0;
+    const SIZE_TOP: f64 = 58.0;
+    const OPACITY_TOP: f64 = 96.0;
+    const TOGGLE_TOP: f64 = 140.0;
+    const TOGGLE_STEP: f64 = 28.0;
+    const FOOTER_TOP: f64 = 296.0;
+
+    /// Snapshot of the controls as they were last handed to or read from the
+    /// app; polling diffs against it, so no AppKit callbacks are needed.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    struct UiState {
+        pet: isize,
+        size: f64,
+        opacity: f64,
+        notifications: bool,
+        notification_sound: bool,
+        gaze: bool,
+        click_through: bool,
+        chat_open: bool,
+    }
+
+    pub struct SettingsPanel {
+        window: Retained<NSWindow>,
+        pet: Retained<NSPopUpButton>,
+        size: Retained<NSSlider>,
+        opacity: Retained<NSSlider>,
+        notifications: Retained<NSButton>,
+        notification_sound: Retained<NSButton>,
+        gaze: Retained<NSButton>,
+        click_through: Retained<NSButton>,
+        chat_open: Retained<NSButton>,
+        last: UiState,
+    }
+
+    impl SettingsPanel {
+        pub fn new(pets: &[String], selected: usize, config: &Config) -> Option<Self> {
+            let mtm = MainThreadMarker::new()?;
+            // SAFETY: `initWithContentRect...` is the designated initializer;
+            // the frame is static and the window is reused after closing.
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, HEIGHT)),
+                    NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            window.setTitle(&NSString::from_str("herdr-pet 设置"));
+            // The panel is owned by `App`; closing it must only order it out.
+            // SAFETY: the setter is otherwise safe to call on the main thread.
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.center();
+            let content = window.contentView()?;
+
+            let pet_label = label(mtm, "宠物", 13.0);
+            place(&pet_label, PAD, PET_TOP + 4.0, LABEL_WIDTH, 16.0);
+            content.addSubview(&pet_label);
+
+            let pet = NSPopUpButton::initWithFrame_pullsDown(
+                NSPopUpButton::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(0.0, 0.0),
+                    NSSize::new(CONTROL_WIDTH, ROW_HEIGHT),
+                ),
+                false,
+            );
+            for name in pets {
+                pet.addItemWithTitle(&NSString::from_str(name));
+            }
+            place(&pet, CONTROL_X, PET_TOP, CONTROL_WIDTH, ROW_HEIGHT);
+            content.addSubview(&pet);
+
+            let size_label = label(mtm, "大小", 13.0);
+            place(&size_label, PAD, SIZE_TOP + 4.0, LABEL_WIDTH, 16.0);
+            content.addSubview(&size_label);
+            let size = slider(mtm, MIN_SIZE, MAX_SIZE);
+            place(&size, CONTROL_X, SIZE_TOP, CONTROL_WIDTH, ROW_HEIGHT);
+            content.addSubview(&size);
+
+            let opacity_label = label(mtm, "气泡不透明度", 13.0);
+            place(&opacity_label, PAD, OPACITY_TOP + 4.0, LABEL_WIDTH, 16.0);
+            content.addSubview(&opacity_label);
+            let opacity = slider(mtm, 0.0, 1.0);
+            place(&opacity, CONTROL_X, OPACITY_TOP, CONTROL_WIDTH, ROW_HEIGHT);
+            content.addSubview(&opacity);
+
+            let toggles = [
+                ("提醒", TOGGLE_TOP),
+                ("通知音效", TOGGLE_TOP + TOGGLE_STEP),
+                ("凝视", TOGGLE_TOP + TOGGLE_STEP * 2.0),
+                ("点击穿透", TOGGLE_TOP + TOGGLE_STEP * 3.0),
+                ("聊天气泡展开", TOGGLE_TOP + TOGGLE_STEP * 4.0),
+            ];
+            let mut buttons = Vec::with_capacity(toggles.len());
+            for (title, top) in toggles {
+                let button = checkbox(mtm, title);
+                place(&button, PAD, top, WIDTH - PAD * 2.0, 20.0);
+                content.addSubview(&button);
+                buttons.push(button);
+            }
+            let [
+                notifications,
+                notification_sound,
+                gaze,
+                click_through,
+                chat_open,
+            ] = <[Retained<NSButton>; 5]>::try_from(buttons).ok()?;
+
+            let footer = label(mtm, "修改会立即生效并保存", 11.0);
+            footer.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            place(&footer, PAD, FOOTER_TOP, WIDTH - PAD * 2.0, 16.0);
+            content.addSubview(&footer);
+
+            let mut panel = Self {
+                window,
+                pet,
+                size,
+                opacity,
+                notifications,
+                notification_sound,
+                gaze,
+                click_through,
+                chat_open,
+                last: UiState::default(),
+            };
+            panel.sync(config, selected);
+            Some(panel)
+        }
+
+        pub fn show(&self) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            // Accessory apps are not activated by a menu-bar click; without
+            // this the window cannot become key and the controls stay inert.
+            NSApplication::sharedApplication(mtm).activate();
+            self.window.makeKeyAndOrderFront(None);
+        }
+
+        /// Changes the user made since the last poll. Controls without
+        /// target/action still track their own state, so reading them is
+        /// enough to support live sliders and toggles.
+        pub fn poll(&mut self) -> Vec<PanelAction> {
+            let current = self.read();
+            let actions = diff(&self.last, &current);
+            self.last = current;
+            actions
+        }
+
+        /// Push the app's config into the controls, e.g. after a tray action
+        /// changed it while the panel was open.
+        pub fn sync(&mut self, config: &Config, selected: usize) {
+            let count = self.pet.numberOfItems();
+            if count > 0 {
+                self.pet
+                    .selectItemAtIndex(selected.min(count as usize - 1) as isize);
+            }
+            self.size.setDoubleValue(config.size);
+            self.opacity.setDoubleValue(config.chat_opacity);
+            set_checked(&self.notifications, config.notifications);
+            set_checked(&self.notification_sound, config.notification_sound);
+            set_checked(&self.gaze, config.gaze);
+            set_checked(&self.click_through, config.click_through);
+            set_checked(&self.chat_open, config.chat_open);
+            self.last = self.read();
+        }
+
+        fn read(&self) -> UiState {
+            UiState {
+                pet: self.pet.indexOfSelectedItem(),
+                size: self.size.doubleValue(),
+                opacity: self.opacity.doubleValue(),
+                notifications: is_checked(&self.notifications),
+                notification_sound: is_checked(&self.notification_sound),
+                gaze: is_checked(&self.gaze),
+                click_through: is_checked(&self.click_through),
+                chat_open: is_checked(&self.chat_open),
+            }
+        }
+    }
+
+    fn diff(previous: &UiState, current: &UiState) -> Vec<PanelAction> {
+        let mut actions = Vec::new();
+        if current.pet != previous.pet && current.pet >= 0 {
+            actions.push(PanelAction::SelectPet(current.pet as usize));
+        }
+        if current.size != previous.size {
+            actions.push(PanelAction::SetSize(current.size));
+        }
+        if current.opacity != previous.opacity {
+            actions.push(PanelAction::SetChatOpacity(current.opacity));
+        }
+        if current.notifications != previous.notifications {
+            actions.push(PanelAction::SetNotifications(current.notifications));
+        }
+        if current.notification_sound != previous.notification_sound {
+            actions.push(PanelAction::SetNotificationSound(
+                current.notification_sound,
+            ));
+        }
+        if current.gaze != previous.gaze {
+            actions.push(PanelAction::SetGaze(current.gaze));
+        }
+        if current.click_through != previous.click_through {
+            actions.push(PanelAction::SetClickThrough(current.click_through));
+        }
+        if current.chat_open != previous.chat_open {
+            actions.push(PanelAction::SetChatOpen(current.chat_open));
+        }
+        actions
+    }
+
+    /// Frame from top-left logical coordinates; AppKit views are placed from
+    /// the content view's bottom-left corner.
+    fn place(view: &NSView, x: f64, top: f64, width: f64, height: f64) {
+        view.setFrame(NSRect::new(
+            NSPoint::new(x, HEIGHT - top - height),
+            NSSize::new(width, height),
+        ));
+    }
+
+    fn label(mtm: MainThreadMarker, text: &str, size: f64) -> Retained<NSTextField> {
+        let label = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+        label.setFont(Some(&NSFont::systemFontOfSize(size)));
+        label
+    }
+
+    fn slider(mtm: MainThreadMarker, min: f64, max: f64) -> Retained<NSSlider> {
+        let slider = NSSlider::new(mtm);
+        slider.setMinValue(min);
+        slider.setMaxValue(max);
+        slider.setContinuous(true);
+        slider
+    }
+
+    fn checkbox(mtm: MainThreadMarker, title: &str) -> Retained<NSButton> {
+        let button = NSButton::new(mtm);
+        button.setButtonType(NSButtonType::Switch);
+        button.setTitle(&NSString::from_str(title));
+        button
+    }
+
+    fn is_checked(button: &NSButton) -> bool {
+        button.state() == NSControlStateValueOn
+    }
+
+    fn set_checked(button: &NSButton, checked: bool) {
+        button.setState(if checked {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn base() -> UiState {
+            UiState {
+                pet: 0,
+                size: 104.0,
+                opacity: 0.7,
+                notifications: true,
+                notification_sound: true,
+                gaze: true,
+                click_through: false,
+                chat_open: true,
+            }
+        }
+
+        #[test]
+        fn identical_state_produces_no_actions() {
+            assert!(diff(&base(), &base()).is_empty());
+        }
+
+        #[test]
+        fn each_control_maps_to_its_action() {
+            let mut next = base();
+            next.pet = 2;
+            assert_eq!(diff(&base(), &next), vec![PanelAction::SelectPet(2)]);
+
+            let mut next = base();
+            next.size = 156.0;
+            assert_eq!(diff(&base(), &next), vec![PanelAction::SetSize(156.0)]);
+
+            let mut next = base();
+            next.opacity = 0.25;
+            assert_eq!(
+                diff(&base(), &next),
+                vec![PanelAction::SetChatOpacity(0.25)]
+            );
+
+            let mut next = base();
+            next.notifications = false;
+            assert_eq!(
+                diff(&base(), &next),
+                vec![PanelAction::SetNotifications(false)]
+            );
+
+            let mut next = base();
+            next.notification_sound = false;
+            assert_eq!(
+                diff(&base(), &next),
+                vec![PanelAction::SetNotificationSound(false)]
+            );
+
+            let mut next = base();
+            next.gaze = false;
+            assert_eq!(diff(&base(), &next), vec![PanelAction::SetGaze(false)]);
+
+            let mut next = base();
+            next.click_through = true;
+            assert_eq!(
+                diff(&base(), &next),
+                vec![PanelAction::SetClickThrough(true)]
+            );
+
+            let mut next = base();
+            next.chat_open = false;
+            assert_eq!(diff(&base(), &next), vec![PanelAction::SetChatOpen(false)]);
+        }
+
+        #[test]
+        fn empty_pet_popup_is_ignored() {
+            let previous = base();
+            let mut current = base();
+            current.pet = -1;
+            assert!(diff(&previous, &current).is_empty());
+        }
     }
 }
 

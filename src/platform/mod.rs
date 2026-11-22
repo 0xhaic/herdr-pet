@@ -4,9 +4,23 @@
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    ChatOverlay, float_on_all_spaces, herdr_app_frontmost, herdr_app_path, left_button_down,
-    mouse_position, send_notification, show_about,
+    ChatOverlay, SettingsPanel, float_on_all_spaces, herdr_app_frontmost, herdr_app_path,
+    left_button_down, mouse_position, send_notification, show_about,
 };
+
+/// Settings-panel controls the app should apply. The panel itself is
+/// platform-specific; poll it once per tick and dispatch the changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PanelAction {
+    SelectPet(usize),
+    SetSize(f64),
+    SetChatOpacity(f64),
+    SetNotifications(bool),
+    SetNotificationSound(bool),
+    SetGaze(bool),
+    SetClickThrough(bool),
+    SetChatOpen(bool),
+}
 
 #[cfg(not(target_os = "macos"))]
 pub fn herdr_app_frontmost() -> bool {
@@ -32,6 +46,30 @@ impl ChatOverlay {
     pub fn set_text(&self, _title: &str, _subtitle: &str) {}
 
     pub fn set_visible(&self, _bubble: bool, _button: bool) {}
+
+    pub fn set_opacity(&self, _opacity: f64) {}
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct SettingsPanel;
+
+#[cfg(not(target_os = "macos"))]
+impl SettingsPanel {
+    pub fn new(
+        _pets: &[String],
+        _selected: usize,
+        _config: &crate::config::Config,
+    ) -> Option<Self> {
+        None
+    }
+
+    pub fn show(&self) {}
+
+    pub fn poll(&mut self) -> Vec<PanelAction> {
+        Vec::new()
+    }
+
+    pub fn sync(&mut self, _config: &crate::config::Config, _selected: usize) {}
 }
 
 #[cfg(not(target_os = "macos"))]

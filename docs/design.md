@@ -74,7 +74,7 @@ herdr-core (Unix socket, JSON-RPC)
         ├── chat.rs   聊天框布局、文案与焦点选择（纯逻辑）
         ├── herdr_app.rs  Herdr 点击跳转（前台判断在主线程）
         ├── render.rs 单张 atlas 纹理 + 宠物子矩形 quad
-        ├── platform/macos.rs  全局鼠标、拖拽、点击穿透、NSVisualEffectView 聊天框
+        ├── platform/macos.rs  全局鼠标、拖拽、点击穿透、NSVisualEffectView 聊天框、设置面板
         ├── notify.rs  afplay + 系统通知（osascript 回落）
         └── tray.rs    tray-icon 菜单
 ```
@@ -335,8 +335,12 @@ Socket 发现顺序：
   macOS 上按模板图（`with_icon_templated`）渲染，只取 alpha，由系统按菜单栏明暗反色。
   图形与应用图标共用同一圆角方形底板与猫头几何：底板实心，猫头与双耳为镂空负空间，
   眼睛由底板透出；切换宠物不更新托盘图标。
-- 菜单：显示/隐藏、下一只宠物、放大、缩小、点击穿透开关、提醒开关、通知音效开关、
+- 菜单：显示/隐藏、下一只宠物、设置、放大、缩小、点击穿透开关、提醒开关、通知音效开关、
   关于、退出。
+- 「设置…」打开原生 AppKit 设置面板（普通 `NSWindow`，关闭后保留实例以便复开）。
+  控件为 `NSPopUpButton`、`NSSlider` 与复选框；不注册 target/action，主线程每帧读取
+  控件状态并与上次快照 diff，生成 `PanelAction` 交给 `App` 的 setter 应用。滑块拖动
+  即时生效，配置写入防抖 400 ms；其它开关立即写回。
 - 「关于」用原生 `NSAlert` 显示简介、编译期版本号（`CARGO_PKG_VERSION`，唯一来源是
   `Cargo.toml`）与仓库链接；「打开仓库」用 `NSWorkspace` 打开
   `https://github.com/0xhaic/herdr-pet`。模态期间事件循环暂停（用户主动操作，可接受）。
@@ -375,10 +379,11 @@ Socket 发现顺序：
 - `notifications` / `notification_sound`：分别控制系统通知与提醒音效，均默认 `true`；
   只关闭音效时仍发送通知，关闭提醒时两者都不执行。
 - `click_through`：整窗点击穿透开关，默认 `false`（保持逐像素穿透 + 可拖拽）；
-  开启后鼠标完全穿透到桌面，只能通过托盘关闭。
+  开启后鼠标完全穿透到桌面，可从托盘或设置面板关闭。
+- `gaze`：凝视开关，默认 `true`；可在设置面板中即时切换，素材无 look 行时自动禁用。
 - `chat_open`：聊天框展开状态，默认 `true`；点击宠物下方箭头按钮切换并写回。
 - `chat_opacity`：聊天气泡玻璃层的不透明度（0–1，越大越不透明），默认 `0.7`，非有限值
-  取默认；`0` 时玻璃层与描边完全透明、只显示文字。只在启动时读取，修改后重启生效。
+  取默认；`0` 时玻璃层与描边完全透明、只显示文字。可在设置面板中实时调整。
 - 写入采用"临时文件 + rename"原子替换；写入失败只记日志，不阻塞 UI。
 
 ### 3.9 图标资产 — `.app` 图标与托盘剪影
