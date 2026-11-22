@@ -16,6 +16,9 @@ pub const DEFAULT_CHAT_OPACITY: f64 = 0.7;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Root directory containing one subdirectory per pet. Missing means
+    /// `$CODEX_HOME/pets` (or `~/.codex/pets`).
+    pub pets_dir: Option<PathBuf>,
     pub pet: Option<String>,
     pub size: f64,
     /// Pet top-left in physical pixels (so expanding the bubble never moves
@@ -37,6 +40,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            pets_dir: None,
             pet: None,
             size: DEFAULT_SIZE,
             position: None,
@@ -152,6 +156,7 @@ mod tests {
     #[test]
     fn defaults_are_sane() {
         let config = Config::default();
+        assert_eq!(config.pets_dir, None);
         assert_eq!(config.pet, None);
         assert_eq!(config.size, 104.0);
         assert_eq!(config.position, None);
@@ -173,6 +178,7 @@ mod tests {
         assert!(!config.click_through);
         assert!(config.chat_open);
         assert_eq!(config.chat_opacity, 0.7);
+        assert_eq!(config.pets_dir, None);
         assert_eq!(config.pet, None);
     }
 
@@ -181,6 +187,7 @@ mod tests {
         let temp = TempDir::new();
         let path = temp.join("config.json");
         let config = Config {
+            pets_dir: Some(PathBuf::from("/tmp/pets")),
             pet: Some("frieren".to_owned()),
             size: 130.0,
             position: Some([100, 200]),

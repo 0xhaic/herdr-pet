@@ -33,8 +33,8 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **提醒**：agent 进入 blocked / done 时弹系统通知并播放提示音（Basso / Glass）；
   是否提醒与是否播放音效可分别开关，同一帧内的多条提醒会合并。
 - **菜单栏控制**：显示/隐藏、设置、关于、退出；其它设置项统一放在设置面板中。
-- **设置面板**：原生小窗口，可实时切换宠物、调整大小与气泡不透明度、开关提醒/音效/
-  凝视/点击穿透/聊天气泡；改动立即生效，停止操作后写回配置。
+- **设置面板**：原生小窗口，可切换宠物、选择宠物目录、调整大小与气泡不透明度、开关
+  提醒/音效/凝视/点击穿透/聊天气泡；改动立即生效，停止操作后写回配置。
 
 ## 前置条件
 
@@ -45,7 +45,7 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   `HC_TERMINAL_SOCKET` → `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock`
   （session 取 `HC_SESSION`，默认 `default`）；连接断开时后台自动重连，宠物保留最后状态。
 - 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`），
-  目录内包含 `pet.json` 与 `spritesheet.webp`。
+  目录内包含 `pet.json` 与 `spritesheet.webp`；可在设置面板中改用其它宠物目录。
 - Herdr.app（可选）：前台判断使用 `NSWorkspace`，点击跳转通过
   `herdr-app do agent.focus` 实现；未安装或找不到时宠物其余功能正常，点击只会
   尝试打开 Herdr。
@@ -62,12 +62,13 @@ cargo run --release            # 启动宠物（需在已登录的 macOS GUI 会
 
 ```bash
 cargo run -- --list-pets                 # 列出可加载宠物及显示名
-cargo run -- --pet diana                 # 按 ~/.codex/pets 下的目录名选择
+cargo run -- --pet diana                 # 按宠物目录下的子目录名选择（默认 ~/.codex/pets）
 cargo run -- --pet /path/to/pet-dir      # 或直接指定宠物目录
 ```
 
 不指定 `--pet` 时使用配置里的 `pet`，否则取搜索目录中第一只可加载宠物。
-`--pet` 与 `--list-pets` 不能同时使用。
+`--pet` 与 `--list-pets` 不能同时使用。搜索目录默认是 `$CODEX_HOME/pets`，
+可用配置项 `pets_dir` 或设置面板中的「宠物目录」更改。
 
 ## 打包为 .app
 
@@ -122,6 +123,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 ```json
 {
+  "pets_dir": null,
   "pet": "diana",
   "size": 104,
   "position": [1512, 812],
@@ -136,6 +138,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
+| `pets_dir` | `null` | 宠物根目录，每个子目录一只宠物；空则使用 `$CODEX_HOME/pets`（默认 `~/.codex/pets`）。可在设置面板中更换或恢复默认 |
 | `pet` | `null` | 启动时使用的宠物名或目录；空则自动选第一只可加载宠物 |
 | `size` | `104` | 宠物高度（logical px），限制在 52–312 |
 | `position` | `null` | 宠物左上角（物理像素，左上角原点）；收起/展开聊天框不会移动宠物。启动时若窗口在所有屏幕之外则回落到默认位置 |

@@ -171,8 +171,16 @@ pub fn pets_dir() -> Result<PathBuf> {
     Ok(codex_home.join("pets"))
 }
 
-pub fn pet_dirs() -> Result<Vec<PathBuf>> {
-    let dir = pets_dir()?;
+/// The pets root: an explicit setting, else the Codex default.
+pub fn pets_base(base: Option<&Path>) -> Result<PathBuf> {
+    match base {
+        Some(path) => Ok(path.to_path_buf()),
+        None => pets_dir(),
+    }
+}
+
+pub fn pet_dirs_in(base: Option<&Path>) -> Result<Vec<PathBuf>> {
+    let dir = pets_base(base)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -187,15 +195,15 @@ pub fn pet_dirs() -> Result<Vec<PathBuf>> {
 }
 
 /// Load the first pet that decodes cleanly, skipping broken candidates.
-pub fn load_first_pet() -> Result<Pet> {
-    let dirs = pet_dirs()?;
+pub fn load_first_pet_in(base: Option<&Path>) -> Result<Pet> {
+    let dirs = pet_dirs_in(base)?;
     for dir in dirs {
         match load_pet(&dir) {
             Ok(pet) => return Ok(pet),
             Err(error) => eprintln!("herdr-pet: skipping {}: {error:#}", dir.display()),
         }
     }
-    bail!("no loadable pet found in {}", pets_dir()?.display())
+    bail!("no loadable pet found in {}", pets_base(base)?.display())
 }
 
 /// Resolve `spritesheetPath` inside the pet directory, rejecting absolute

@@ -10,7 +10,7 @@ pub use macos::{
 
 /// Settings-panel controls the app should apply. The panel itself is
 /// platform-specific; poll it once per tick and dispatch the changes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PanelAction {
     SelectPet(usize),
     SetSize(f64),
@@ -20,6 +20,8 @@ pub enum PanelAction {
     SetGaze(bool),
     SetClickThrough(bool),
     SetChatOpen(bool),
+    SetPetsDir(std::path::PathBuf),
+    ResetPetsDir,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -59,6 +61,8 @@ impl SettingsPanel {
         _pets: &[String],
         _selected: usize,
         _config: &crate::config::Config,
+        _pets_dir: &std::path::Path,
+        _custom_dir: bool,
     ) -> Option<Self> {
         None
     }
@@ -70,6 +74,15 @@ impl SettingsPanel {
     }
 
     pub fn sync(&mut self, _config: &crate::config::Config, _selected: usize) {}
+
+    pub fn sync_pets(
+        &mut self,
+        _pets: &[String],
+        _selected: usize,
+        _pets_dir: &std::path::Path,
+        _custom_dir: bool,
+    ) {
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -336,31 +336,37 @@ mod overlay {
 }
 
 mod settings {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc::{Receiver, Sender, channel};
+
     use objc2::rc::Retained;
-    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
         NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
-        NSControlStateValueOn, NSFont, NSPopUpButton, NSSlider, NSTextField, NSView, NSWindow,
-        NSWindowStyleMask,
+        NSControlStateValueOn, NSFont, NSLineBreakMode, NSModalResponseOK, NSOpenPanel,
+        NSPopUpButton, NSSlider, NSTextField, NSView, NSWindow, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
     use crate::config::{Config, MAX_SIZE, MIN_SIZE};
     use crate::platform::PanelAction;
 
     const WIDTH: f64 = 320.0;
-    const HEIGHT: f64 = 330.0;
+    const HEIGHT: f64 = 392.0;
     const PAD: f64 = 20.0;
     const LABEL_WIDTH: f64 = 96.0;
     const CONTROL_X: f64 = 116.0;
     const CONTROL_WIDTH: f64 = WIDTH - CONTROL_X - PAD;
     const ROW_HEIGHT: f64 = 24.0;
     const PET_TOP: f64 = 20.0;
-    const SIZE_TOP: f64 = 58.0;
-    const OPACITY_TOP: f64 = 96.0;
-    const TOGGLE_TOP: f64 = 140.0;
+    const DIR_TOP: f64 = 58.0;
+    const DIR_BUTTON_TOP: f64 = 84.0;
+    const SIZE_TOP: f64 = 122.0;
+    const OPACITY_TOP: f64 = 160.0;
+    const TOGGLE_TOP: f64 = 204.0;
     const TOGGLE_STEP: f64 = 28.0;
-    const FOOTER_TOP: f64 = 296.0;
+    const FOOTER_TOP: f64 = 358.0;
 
     /// Snapshot of the controls as they were last handed to or read from the
     /// app; polling diffs against it, so no AppKit callbacks are needed.
@@ -379,6 +385,8 @@ mod settings {
     pub struct SettingsPanel {
         window: Retained<NSWindow>,
         pet: Retained<NSPopUpButton>,
+        dir_label: Retained<NSTextField>,
+        reset_dir: Retained<NSButton>,
         size: Retained<NSSlider>,
         opacity: Retained<NSSlider>,
         notifications: Retained<NSButton>,
@@ -386,11 +394,20 @@ mod settings {
         gaze: Retained<NSButton>,
         click_through: Retained<NSButton>,
         chat_open: Retained<NSButton>,
+        /// NSControl does not retain its target, so the panel keeps it alive.
+        path_chooser: Retained<PathChooser>,
+        dir_events: Receiver<PanelAction>,
         last: UiState,
     }
 
     impl SettingsPanel {
-        pub fn new(pets: &[String], selected: usize, config: &Config) -> Option<Self> {
+        pub fn new(
+            pets: &[String],
+            selected: usize,
+            config: &Config,
+            pets_dir: &Path,
+            custom_dir: bool,
+        ) -> Option<Self> {
             let mtm = MainThreadMarker::new()?;
             // SAFETY: `initWithContentRect...` is the designated initializer;
             // the frame is static and the window is reused after closing.
@@ -422,11 +439,40 @@ mod settings {
                 ),
                 false,
             );
-            for name in pets {
-                pet.addItemWithTitle(&NSString::from_str(name));
-            }
             place(&pet, CONTROL_X, PET_TOP, CONTROL_WIDTH, ROW_HEIGHT);
             content.addSubview(&pet);
+
+            let (dir_sender, dir_events) = channel();
+            let path_chooser = PathChooser::new(mtm, pets_dir, dir_sender);
+            let dir_title = label(mtm, "宠物目录", 13.0);
+            place(&dir_title, PAD, DIR_TOP + 4.0, LABEL_WIDTH, 16.0);
+            content.addSubview(&dir_title);
+            let dir_label = label(mtm, "", 11.0);
+            dir_label.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+            dir_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            place(&dir_label, CONTROL_X, DIR_TOP + 4.0, CONTROL_WIDTH, 16.0);
+            content.addSubview(&dir_label);
+
+            let choose_dir = push_button(mtm, "选择目录…");
+            place(&choose_dir, CONTROL_X, DIR_BUTTON_TOP, 100.0, ROW_HEIGHT);
+            content.addSubview(&choose_dir);
+            let reset_dir = push_button(mtm, "恢复默认");
+            place(
+                &reset_dir,
+                CONTROL_X + 106.0,
+                DIR_BUTTON_TOP,
+                CONTROL_WIDTH - 106.0,
+                ROW_HEIGHT,
+            );
+            content.addSubview(&reset_dir);
+            // SAFETY: both selectors exist on `PathChooser`, and the panel
+            // retains the chooser for as long as the buttons can fire.
+            unsafe {
+                let _: () = msg_send![&choose_dir, setTarget: &*path_chooser];
+                let _: () = msg_send![&choose_dir, setAction: sel!(choosePetsDirectory:)];
+                let _: () = msg_send![&reset_dir, setTarget: &*path_chooser];
+                let _: () = msg_send![&reset_dir, setAction: sel!(resetPetsDirectory:)];
+            }
 
             let size_label = label(mtm, "大小", 13.0);
             place(&size_label, PAD, SIZE_TOP + 4.0, LABEL_WIDTH, 16.0);
@@ -472,6 +518,8 @@ mod settings {
             let mut panel = Self {
                 window,
                 pet,
+                dir_label,
+                reset_dir,
                 size,
                 opacity,
                 notifications,
@@ -479,8 +527,11 @@ mod settings {
                 gaze,
                 click_through,
                 chat_open,
+                path_chooser,
+                dir_events,
                 last: UiState::default(),
             };
+            panel.sync_pets(pets, selected, pets_dir, custom_dir);
             panel.sync(config, selected);
             Some(panel)
         }
@@ -499,10 +550,39 @@ mod settings {
         /// target/action still track their own state, so reading them is
         /// enough to support live sliders and toggles.
         pub fn poll(&mut self) -> Vec<PanelAction> {
+            let mut actions = Vec::new();
+            while let Ok(action) = self.dir_events.try_recv() {
+                actions.push(action);
+            }
             let current = self.read();
-            let actions = diff(&self.last, &current);
+            actions.extend(diff(&self.last, &current));
             self.last = current;
             actions
+        }
+
+        /// Refresh the pet list and the effective root directory. Called when
+        /// the panel opens and after the directory changes.
+        pub fn sync_pets(
+            &mut self,
+            pets: &[String],
+            selected: usize,
+            pets_dir: &Path,
+            custom_dir: bool,
+        ) {
+            self.pet.removeAllItems();
+            for name in pets {
+                self.pet.addItemWithTitle(&NSString::from_str(name));
+            }
+            if !pets.is_empty() {
+                self.pet
+                    .selectItemAtIndex(selected.min(pets.len() - 1) as isize);
+            }
+            let text = NSString::from_str(&pets_dir.to_string_lossy());
+            self.dir_label.setStringValue(&text);
+            self.dir_label.setToolTip(Some(&text));
+            self.reset_dir.setEnabled(custom_dir);
+            self.path_chooser.set_dir(pets_dir);
+            self.last.pet = self.pet.indexOfSelectedItem();
         }
 
         /// Push the app's config into the controls, e.g. after a tray action
@@ -535,6 +615,69 @@ mod settings {
                 chat_open: is_checked(&self.chat_open),
             }
         }
+    }
+
+    struct PathChooserIvars {
+        dir: RefCell<PathBuf>,
+        sender: Sender<PanelAction>,
+    }
+
+    // The directory buttons need a real action callback; sliders and toggles
+    // stay callback-free and are polled above.
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements, and the class only
+        // holds plain Rust data.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[ivars = PathChooserIvars]
+        struct PathChooser;
+
+        unsafe impl NSObjectProtocol for PathChooser {}
+
+        impl PathChooser {
+            #[unsafe(method(choosePetsDirectory:))]
+            fn choose_pets_directory(&self, _sender: &NSButton) {
+                let dir = self.ivars().dir.borrow().clone();
+                if let Some(path) = choose_directory(&dir) {
+                    let _ = self.ivars().sender.send(PanelAction::SetPetsDir(path));
+                }
+            }
+
+            #[unsafe(method(resetPetsDirectory:))]
+            fn reset_pets_directory(&self, _sender: &NSButton) {
+                let _ = self.ivars().sender.send(PanelAction::ResetPetsDir);
+            }
+        }
+    );
+
+    impl PathChooser {
+        fn new(mtm: MainThreadMarker, dir: &Path, sender: Sender<PanelAction>) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(PathChooserIvars {
+                dir: RefCell::new(dir.to_path_buf()),
+                sender,
+            });
+            // SAFETY: NSObject's init has this signature.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        fn set_dir(&self, dir: &Path) {
+            *self.ivars().dir.borrow_mut() = dir.to_path_buf();
+        }
+    }
+
+    fn choose_directory(initial: &Path) -> Option<PathBuf> {
+        let mtm = MainThreadMarker::new()?;
+        let panel = NSOpenPanel::openPanel(mtm);
+        panel.setCanChooseFiles(false);
+        panel.setCanChooseDirectories(true);
+        panel.setAllowsMultipleSelection(false);
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&initial.to_string_lossy()));
+        panel.setDirectoryURL(Some(&url));
+        if panel.runModal() != NSModalResponseOK {
+            return None;
+        }
+        let path = panel.URL()?.path()?;
+        Some(PathBuf::from(path.to_string()))
     }
 
     fn diff(previous: &UiState, current: &UiState) -> Vec<PanelAction> {
@@ -594,6 +737,13 @@ mod settings {
     fn checkbox(mtm: MainThreadMarker, title: &str) -> Retained<NSButton> {
         let button = NSButton::new(mtm);
         button.setButtonType(NSButtonType::Switch);
+        button.setTitle(&NSString::from_str(title));
+        button
+    }
+
+    fn push_button(mtm: MainThreadMarker, title: &str) -> Retained<NSButton> {
+        let button = NSButton::new(mtm);
+        button.setButtonType(NSButtonType::MomentaryPushIn);
         button.setTitle(&NSString::from_str(title));
         button
     }

@@ -53,7 +53,7 @@ enum Cli {
 fn main() -> Result<()> {
     let config = config::load();
     match parse_cli(std::env::args().skip(1))? {
-        Cli::ListPets => list_pets(),
+        Cli::ListPets => list_pets(&config),
         Cli::Run { pet } => run(pet, config),
     }
 }
@@ -83,10 +83,11 @@ fn parse_cli(mut args: impl Iterator<Item = String>) -> Result<Cli> {
     })
 }
 
-fn list_pets() -> Result<()> {
-    let dirs = pet::pet_dirs()?;
+fn list_pets(config: &Config) -> Result<()> {
+    let base = config.pets_dir.as_deref();
+    let dirs = pet::pet_dirs_in(base)?;
     if dirs.is_empty() {
-        println!("no pets in {}", pet::pets_dir()?.display());
+        println!("no pets in {}", pet::pets_base(base)?.display());
         return Ok(());
     }
     for dir in dirs {
@@ -130,11 +131,12 @@ fn run(pet_spec: Option<String>, config: Config) -> Result<()> {
 }
 
 fn open_pet(cli_pet: Option<&str>, config: &Config) -> Result<Pet> {
+    let base = config.pets_dir.as_deref();
     if let Some(spec) = cli_pet {
-        return open_pet_spec(spec);
+        return open_pet_spec(spec, base);
     }
     if let Some(spec) = config.pet.as_deref().filter(|spec| !spec.is_empty()) {
-        match open_pet_spec(spec) {
+        match open_pet_spec(spec, base) {
             Ok(pet) => return Ok(pet),
             Err(error) => {
                 eprintln!(
@@ -143,15 +145,15 @@ fn open_pet(cli_pet: Option<&str>, config: &Config) -> Result<Pet> {
             }
         }
     }
-    pet::load_first_pet()
+    pet::load_first_pet_in(base)
 }
 
-fn open_pet_spec(spec: &str) -> Result<Pet> {
+fn open_pet_spec(spec: &str, base: Option<&Path>) -> Result<Pet> {
     let direct = PathBuf::from(spec);
     if direct.join("pet.json").is_file() {
         return pet::load_pet(&direct);
     }
-    let candidate = pet::pets_dir()?.join(spec);
+    let candidate = pet::pets_base(base)?.join(spec);
     if candidate.join("pet.json").is_file() {
         return pet::load_pet(&candidate);
     }
@@ -173,8 +175,8 @@ fn pet_display_name(dir: &Path) -> String {
         })
 }
 
-fn pet_spec(pet: &Pet) -> String {
-    if let Ok(pets_dir) = pet::pets_dir()
+fn pet_spec(pet: &Pet, base: Option<&Path>) -> String {
+    if let Ok(pets_dir) = pet::pets_base(base)
         && pet.dir.parent() == Some(pets_dir.as_path())
         && let Some(name) = pet.dir.file_name().and_then(|name| name.to_str())
     {
@@ -290,7 +292,7 @@ impl App {
         config.chat_opacity = clamp_chat_opacity(config.chat_opacity);
         let animator = Animator::new(config.gaze && pet.atlas.gaze_enabled());
         let pending_uv = pet.atlas.cell_uv(0, 0);
-        let pets = pet::pet_dirs().unwrap_or_default();
+        let pets = pet::pet_dirs_in(config.pets_dir.as_deref()).unwrap_or_default();
         let pet_index = pets.iter().position(|dir| dir == &pet.dir).unwrap_or(0);
         let chat_layout = ChatLayout::new(config.size);
         Self {
@@ -358,7 +360,7 @@ impl App {
                 position.y + (origin_y * scale).round() as i32,
             ]);
         }
-        self.config.pet = Some(pet_spec(&self.pet));
+        self.config.pet = Some(pet_spec(&self.pet, self.config.pets_dir.as_deref()));
         if let Err(error) = self.config.save() {
             eprintln!("herdr-pet: cannot save config: {error:#}");
         }
@@ -787,7 +789,14 @@ impl App {
     fn open_panel(&mut self) {
         if self.panel.is_none() {
             let names: Vec<String> = self.pets.iter().map(|dir| pet_display_name(dir)).collect();
-            match SettingsPanel::new(&names, self.pet_index, &self.config) {
+            let pets_dir = pet::pets_base(self.config.pets_dir.as_deref()).unwrap_or_default();
+            match SettingsPanel::new(
+                &names,
+                self.pet_index,
+                &self.config,
+                &pets_dir,
+                self.config.pets_dir.is_some(),
+            ) {
                 Some(panel) => self.panel = Some(panel),
                 None => {
                     eprintln!("herdr-pet: settings panel unavailable");
@@ -819,6 +828,8 @@ impl App {
                 PanelAction::SetGaze(enabled) => self.set_gaze(enabled),
                 PanelAction::SetClickThrough(enabled) => self.set_click_through(enabled),
                 PanelAction::SetChatOpen(open) => self.set_chat_open(open),
+                PanelAction::SetPetsDir(dir) => self.set_pets_dir(Some(dir)),
+                PanelAction::ResetPetsDir => self.set_pets_dir(None),
             }
         }
     }
@@ -826,6 +837,19 @@ impl App {
     fn sync_panel(&mut self) {
         if let Some(panel) = &mut self.panel {
             panel.sync(&self.config, self.pet_index);
+        }
+    }
+
+    fn sync_panel_pets(&mut self) {
+        let names: Vec<String> = self.pets.iter().map(|dir| pet_display_name(dir)).collect();
+        let pets_dir = pet::pets_base(self.config.pets_dir.as_deref()).unwrap_or_default();
+        if let Some(panel) = &mut self.panel {
+            panel.sync_pets(
+                &names,
+                self.pet_index,
+                &pets_dir,
+                self.config.pets_dir.is_some(),
+            );
         }
     }
 
@@ -904,16 +928,8 @@ impl App {
         };
         match pet::load_pet(dir) {
             Ok(next) => {
-                self.pet = next;
                 self.pet_index = index;
-                self.animator = Animator::new(self.config.gaze && self.pet.atlas.gaze_enabled());
-                self.config.pet = Some(pet_spec(&self.pet));
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.replace_atlas(&self.pet.atlas);
-                }
-                self.pending_uv = self.pet.atlas.cell_uv(0, 0);
-                self.force_redraw = true;
-                self.next_tick = Instant::now();
+                self.install_pet(next);
                 self.save_config();
                 self.sync_panel();
             }
@@ -922,6 +938,57 @@ impl App {
                 self.sync_panel();
             }
         }
+    }
+
+    fn install_pet(&mut self, pet: Pet) {
+        self.pet = pet;
+        self.animator = Animator::new(self.config.gaze && self.pet.atlas.gaze_enabled());
+        self.config.pet = Some(pet_spec(&self.pet, self.config.pets_dir.as_deref()));
+        if let Some(renderer) = &mut self.renderer {
+            renderer.replace_atlas(&self.pet.atlas);
+        }
+        self.pending_uv = self.pet.atlas.cell_uv(0, 0);
+        self.force_redraw = true;
+        self.next_tick = Instant::now();
+    }
+
+    fn set_pets_dir(&mut self, dir: Option<PathBuf>) {
+        let dirs = match pet::pet_dirs_in(dir.as_deref()) {
+            Ok(dirs) => dirs,
+            Err(error) => {
+                eprintln!("herdr-pet: cannot read the pets directory: {error:#}");
+                self.sync_panel();
+                return;
+            }
+        };
+        let mut chosen = None;
+        if let Some(index) = dirs.iter().position(|candidate| candidate == &self.pet.dir) {
+            chosen = Some((index, None));
+        } else {
+            for (index, path) in dirs.iter().enumerate() {
+                match pet::load_pet(path) {
+                    Ok(pet) => {
+                        chosen = Some((index, Some(pet)));
+                        break;
+                    }
+                    Err(error) => eprintln!("herdr-pet: skipping {}: {error:#}", path.display()),
+                }
+            }
+        }
+        let Some((index, loaded)) = chosen else {
+            eprintln!("herdr-pet: no loadable pet in the selected directory");
+            self.sync_panel();
+            return;
+        };
+        self.config.pets_dir = dir;
+        self.pets = dirs;
+        self.pet_index = index;
+        if let Some(pet) = loaded {
+            self.install_pet(pet);
+        }
+        self.save_config();
+        self.sync_panel();
+        self.sync_panel_pets();
     }
 }
 
