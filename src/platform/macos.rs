@@ -162,16 +162,17 @@ mod overlay {
                 NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.09),
             );
             bubble.setAlphaValue(opacity);
+            // `textColor` resolves to opaque black in Aqua and white in Dark
+            // Aqua, so the text stays legible on the glass in both
+            // appearances. Fade the subtitle via view alpha to keep the
+            // dynamic color intact.
             let title = label(
                 mtm,
                 NSFont::boldSystemFontOfSize(13.0),
-                NSColor::colorWithCalibratedWhite_alpha(1.0, 0.95),
+                NSColor::textColor(),
             );
-            let subtitle = label(
-                mtm,
-                NSFont::systemFontOfSize(13.0),
-                NSColor::colorWithCalibratedWhite_alpha(0.78, 0.88),
-            );
+            let subtitle = label(mtm, NSFont::systemFontOfSize(13.0), NSColor::textColor());
+            subtitle.setAlphaValue(0.85);
             // Labels sit above the glass rather than inside it, so the
             // bubble's own opacity does not fade the text.
             container.addSubview(&bubble);
