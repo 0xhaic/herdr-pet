@@ -166,9 +166,10 @@ mod overlay {
     use objc2::rc::Retained;
     use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
-        NSBox, NSBoxType, NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSTextField,
-        NSTitlePosition, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-        NSVisualEffectState, NSVisualEffectView,
+        NSBox, NSBoxType, NSColor, NSControlSize, NSFont, NSImage, NSImageView, NSLineBreakMode,
+        NSProgressIndicator, NSProgressIndicatorStyle, NSTextField, NSTitlePosition, NSView,
+        NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+        NSVisualEffectView,
     };
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -187,6 +188,7 @@ mod overlay {
     const ARROW_SYMBOL_SIZE: f64 = 12.0;
     const AGENT_ICON_SIZE: f64 = 14.0;
     const AGENT_ICON_GAP: f64 = 6.0;
+    const SPINNER_SIZE: f64 = 16.0;
 
     /// Frame inputs from the last layout pass, kept so an icon appearing can
     /// reflow the title row without waiting for another window resize.
@@ -225,6 +227,8 @@ mod overlay {
         subtitle: Retained<NSTextField>,
         agent_icon: Retained<NSImageView>,
         status_icon: Retained<NSImageView>,
+        /// Native spinner shown instead of `status_icon` while working.
+        status_spinner: Retained<NSProgressIndicator>,
         prev_arrow: Retained<NSImageView>,
         next_arrow: Retained<NSImageView>,
         button: Retained<NSVisualEffectView>,
@@ -236,6 +240,7 @@ mod overlay {
         button_visible: Cell<bool>,
         pager_visible: Cell<bool>,
         icon_present: Cell<bool>,
+        status_working: Cell<bool>,
         frames: Cell<Option<Frames>>,
         /// Requested icon path and tint, so a subtitle change does not reload
         /// the same SVG from disk.
@@ -290,9 +295,18 @@ mod overlay {
             container.addSubview(&agent_icon);
 
             // The state glyph sits before the subtitle, in the same left column
-            // as the agent icon.
+            // as the agent icon. Working swaps the static glyph for a native
+            // spinner; threaded animation keeps it off the main thread.
             let status_icon = NSImageView::new(mtm);
             container.addSubview(&status_icon);
+            let status_spinner = NSProgressIndicator::new(mtm);
+            status_spinner.setStyle(NSProgressIndicatorStyle::Spinning);
+            status_spinner.setControlSize(NSControlSize::Small);
+            status_spinner.setDisplayedWhenStopped(false);
+            // SAFETY: the spinner lives on the main thread; this only selects
+            // AppKit's internal animation thread.
+            unsafe { status_spinner.setUsesThreadedAnimation(true) };
+            container.addSubview(&status_spinner);
 
             // Agent pager arrows live inside the bubble's trailing end and
             // stay fully opaque like the labels.
@@ -325,6 +339,7 @@ mod overlay {
                 subtitle,
                 agent_icon,
                 status_icon,
+                status_spinner,
                 prev_arrow,
                 next_arrow,
                 button,
@@ -334,6 +349,7 @@ mod overlay {
                 button_visible: Cell::new(false),
                 pager_visible: Cell::new(false),
                 icon_present: Cell::new(false),
+                status_working: Cell::new(false),
                 frames: Cell::new(None),
                 icon_key: RefCell::new(None),
             };
@@ -408,6 +424,13 @@ mod overlay {
                 ),
                 NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE),
             ));
+            self.status_spinner.setFrame(NSRect::new(
+                NSPoint::new(
+                    bubble.origin.x + TEXT_INSET_X - (SPINNER_SIZE - AGENT_ICON_SIZE) / 2.0,
+                    subtitle_y + (TEXT_LINE_HEIGHT - SPINNER_SIZE) / 2.0,
+                ),
+                NSSize::new(SPINNER_SIZE, SPINNER_SIZE),
+            ));
             let button = NSRect::new(
                 NSPoint::new(layout.button.x, height - layout.button.y - layout.button.h),
                 NSSize::new(layout.button.w, layout.button.h),
@@ -463,24 +486,30 @@ mod overlay {
             self.apply_visibility();
         }
 
-        /// Set the state glyph on the subtitle row. Semantic colors keep the
-        /// state scannable while the text stays the agent's own message.
+        /// Set the state glyph on the subtitle row. Working switches to the
+        /// native spinner; the other states keep semantic-colored static
+        /// glyphs so the agent's own message stays the focus.
         pub fn set_status(&self, status: Option<AgentStatus>) {
-            let color = match status {
-                Some(AgentStatus::Working) => NSColor::systemBlueColor(),
-                Some(AgentStatus::Blocked) => NSColor::systemOrangeColor(),
-                Some(AgentStatus::Done) => NSColor::systemGreenColor(),
-                Some(AgentStatus::Error) => NSColor::systemRedColor(),
-                Some(AgentStatus::Idle) | None => NSColor::secondaryLabelColor(),
-            };
-            self.status_icon.setContentTintColor(Some(&color));
-            if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                &NSString::from_str(status_symbol(status)),
-                None,
-            ) {
-                image.setSize(NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE));
-                self.status_icon.setImage(Some(&image));
+            let working = status == Some(AgentStatus::Working);
+            self.status_working.set(working);
+            if !working {
+                let color = match status {
+                    Some(AgentStatus::Working) => NSColor::systemBlueColor(),
+                    Some(AgentStatus::Blocked) => NSColor::systemOrangeColor(),
+                    Some(AgentStatus::Done) => NSColor::systemGreenColor(),
+                    Some(AgentStatus::Error) => NSColor::systemRedColor(),
+                    Some(AgentStatus::Idle) | None => NSColor::secondaryLabelColor(),
+                };
+                self.status_icon.setContentTintColor(Some(&color));
+                if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                    &NSString::from_str(status_symbol(status)),
+                    None,
+                ) {
+                    image.setSize(NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE));
+                    self.status_icon.setImage(Some(&image));
+                }
             }
+            self.apply_visibility();
         }
 
         pub fn set_opacity(&self, opacity: f64) {
@@ -504,7 +533,18 @@ mod overlay {
             self.subtitle.setHidden(!bubble);
             self.agent_icon
                 .setHidden(!(bubble && self.icon_present.get()));
-            self.status_icon.setHidden(!bubble);
+            let spinning = bubble && self.status_working.get();
+            self.status_icon.setHidden(!bubble || spinning);
+            self.status_spinner.setHidden(!spinning);
+            // SAFETY: nil is the documented sender for these actions; the
+            // spinner is a main-thread view owned by this overlay.
+            unsafe {
+                if spinning {
+                    self.status_spinner.startAnimation(None);
+                } else {
+                    self.status_spinner.stopAnimation(None);
+                }
+            }
             let pager = bubble && self.pager_visible.get();
             self.prev_arrow.setHidden(!pager);
             self.next_arrow.setHidden(!pager);

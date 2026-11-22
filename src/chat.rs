@@ -236,8 +236,9 @@ pub fn chat_text(agent: Option<&TerminalAgent>) -> ChatText {
     }
 }
 
-/// SF Symbol shown before the subtitle for each state; the no-agent
-/// placeholder gets a neutral dots glyph.
+/// SF Symbol shown before the subtitle for each state. `Working` renders as
+/// the native spinner at runtime; the no-agent placeholder gets a neutral
+/// dots glyph.
 pub fn status_symbol(status: Option<AgentStatus>) -> &'static str {
     match status {
         None => "ellipsis.circle",
