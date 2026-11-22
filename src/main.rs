@@ -206,10 +206,13 @@ fn clamp_chat_opacity(opacity: f64) -> f64 {
     }
 }
 
-fn mood_for(status: Option<AgentStatus>) -> Mood {
+/// `unseen_done` reports whether any live done agent is still unviewed in
+/// Herdr; unseen Done stands in the review loop, seen Done sits.
+fn mood_for(status: Option<AgentStatus>, unseen_done: bool) -> Mood {
     match status {
         Some(AgentStatus::Blocked) => Mood::Blocked,
         Some(AgentStatus::Error) => Mood::Failed,
+        Some(AgentStatus::Done) if unseen_done => Mood::Review,
         Some(AgentStatus::Done) => Mood::Done,
         Some(AgentStatus::Working) => Mood::Working,
         Some(AgentStatus::Idle) | None => Mood::Idle,
@@ -1008,8 +1011,13 @@ impl App {
         let gaze = snapshot.and_then(|snapshot| self.gaze(snapshot, pointer));
         let hover = self.hovered(local);
         let dragging = self.dragging.as_ref().map(|drag| drag.dir);
+        let seen = &self.herdr_attention.seen;
+        let unseen_done = self.mood == Some(AgentStatus::Done)
+            && self
+                .table
+                .has_unseen_done(|address| !seen.contains(address));
         let input = AnimInput {
-            mood: mood_for(self.mood),
+            mood: mood_for(self.mood, unseen_done),
             dragging,
             gaze,
             hover,
@@ -1751,11 +1759,12 @@ mod tests {
 
     #[test]
     fn aggregate_status_maps_to_mood() {
-        assert_eq!(mood_for(Some(AgentStatus::Blocked)), Mood::Blocked);
-        assert_eq!(mood_for(Some(AgentStatus::Error)), Mood::Failed);
-        assert_eq!(mood_for(Some(AgentStatus::Done)), Mood::Done);
-        assert_eq!(mood_for(Some(AgentStatus::Working)), Mood::Working);
-        assert_eq!(mood_for(Some(AgentStatus::Idle)), Mood::Idle);
-        assert_eq!(mood_for(None), Mood::Idle);
+        assert_eq!(mood_for(Some(AgentStatus::Blocked), false), Mood::Blocked);
+        assert_eq!(mood_for(Some(AgentStatus::Error), false), Mood::Failed);
+        assert_eq!(mood_for(Some(AgentStatus::Done), true), Mood::Review);
+        assert_eq!(mood_for(Some(AgentStatus::Done), false), Mood::Done);
+        assert_eq!(mood_for(Some(AgentStatus::Working), false), Mood::Working);
+        assert_eq!(mood_for(Some(AgentStatus::Idle), true), Mood::Idle);
+        assert_eq!(mood_for(None, true), Mood::Idle);
     }
 }

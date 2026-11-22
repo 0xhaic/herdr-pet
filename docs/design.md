@@ -124,7 +124,7 @@ herdr-core (Unix socket, JSON-RPC)
 | 5 | failed | 8 | error/崩溃 |
 | 6 | waiting | 6 | blocked 等待输入 |
 | 7 | running | 6 | working（打字/处理） |
-| 8 | review | 6 | 素材保留；当前状态机不使用 |
+| 8 | review | 6 | done 未查看（Herdr 未标记已读）时的长期状态 |
 | 9 | look A | 8 | 凝视 000°–157.5° |
 | 10 | look B | 8 | 凝视 180°–337.5° |
 
@@ -138,6 +138,7 @@ herdr-core (Unix socket, JSON-RPC)
 - failed：`[140 × 7, 240]`
 - waiting：`[150 × 5, 260]`
 - running：`[120 × 5, 220]`
+- review：`[150 × 5, 280]`
 - 凝视行由鼠标角度直接选列，不按时间播放。
 
 来源说明：动作行命名与状态→动作映射沿用 Codex 契约（hatch-pet 文档与
@@ -149,6 +150,7 @@ idle 时长取自 herdr-pet `src/sprites.rs`。后续若与真实 Codex 行为�
 ```text
 Mood::Working  -> running（循环）
 Mood::Blocked  -> waving（一次） -> waiting（循环）
+Mood::Review   -> jumping（一次）-> review（循环）；Herdr 标记已读后直接转 Done 坐姿
 Mood::Done     -> jumping（一次）-> 坐姿；连续 done 30 秒后开放 60 秒凝视窗口
 Mood::Failed   -> failed（循环）
 Mood::Idle     -> idle（循环）-> 长待机随机 waving / jumping（一次）-> idle
@@ -156,6 +158,11 @@ Mood::Idle     -> idle（循环）-> 长待机随机 waving / jumping（一次�
 Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
 鼠标悬停       -> jumping ×3 -> idle（覆盖除拖拽外的状态）
 ```
+
+`Mood::Review` 表示聚合状态为 Done、且至少一个 done 终端尚未被 Herdr 标记已读；
+未读完成沿用 jumping 一次作为完成沿提醒，随后循环 review 表示等待查看。查看不是新的
+完成事件，Review → Done 直接回到坐姿，不重播 jumping；Done → Review（另一个 agent
+完成且未读）则视为新的完成并重播 jumping。
 
 - 一次性行播完用余量时间进入下一行，不丢帧。
 - 行切换以 `row_started_ms` 为基准；Mood 改变时重置。
@@ -167,7 +174,8 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
   （Done 坐姿的凝视例外：返回坐姿，不重播 jumping）。
 - 凝视：`angle = atan2(dx, -dy)`，0° 向上，顺时针每 22.5° 一格，共 16 格；
   距离小于死区（24 logical px）回落到 idle。鼠标在宠物正上方时 `000`。
-  Done 的 jumping 播放结束后进入坐姿；从首次观察到聚合状态连续为 Done 起，
+  已读 Done 的 jumping 播放结束后进入坐姿；未读 Done 在 jumping 后循环 review
+  （见下条）。从首次观察到聚合状态连续为 Done 起，
   前 30 秒不响应凝视，之后开放 60 秒凝视窗口（第 30–90 秒）。窗口内凝视结束
   回到坐姿并重置 idle 计时，不重播 jumping；窗口在第 90 秒关闭时，即使鼠标仍在
   凝视区也回到 idle 坐姿，且本次 Done 不再凝视；jumping 入场本身不会被凝视打断。
@@ -176,12 +184,17 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
 - 悬停：与 Codex 宠物组件的 `respondToHover` 一致。鼠标进入宠物窗口矩形即悬停，
   播放 jumping 3 次后进入 idle 坐姿循环；悬停期间覆盖除拖拽外的状态并暂停凝视，
   移出后恢复当前 Mood（重置 idle 计时）。
-- Done 不再循环 review：herdr 的 done 会长期存在，review 会让宠物一直站立；
-  jumping 播完回到 idle 坐姿，保留变化沿提醒但不阻塞默认坐姿。
-- 测试锚点：`frame_index` 边界、waving→waiting、jumping→idle、idle 随机动作的
-  阈值/选择/回退/打断与重置、悬停 jumping×3→idle、悬停覆盖凝视、拖拽优先、
-  Done 凝视的 30 秒延迟、60 秒窗口开闭与 Done 中断重置、jumping 不被凝视跳过、
-  离开凝视回坐姿、8 个基本方向、16 格取整、死区、无凝视行时回落 idle。
+- Done 按已读状态拆分：herdr 的 done 语义是「你没看的时候完成了」，未读 done 在
+  jumping 后循环 review，提示有完成结果待查看；Herdr 标记已读后回到 idle 坐姿，
+  已读 done 不长期站立。凝视窗口仍从首次观察到聚合连续 Done 起算（Review 段照常
+  计时），review 期间不响应凝视；转入已读坐姿时若仍在 30–90 秒窗口内，可立即凝视。
+  `view.json` 不可读时全部 done 按未读处理，review 会一直保持（与气泡保留一致）。
+- 测试锚点：`frame_index` 边界、waving→waiting、jumping→idle、jumping→review、
+  Review→Done 不重播 jumping、review 期间不凝视、Done→Review 重播 jumping、
+  idle 随机动作的阈值/选择/回退/打断与重置、悬停 jumping×3→idle、悬停覆盖凝视、
+  拖拽优先、Done 凝视的 30 秒延迟、60 秒窗口开闭与 Done 中断重置、
+  jumping 不被凝视跳过、离开凝视回坐姿、8 个基本方向、16 格取整、死区、
+  无凝视行时回落 idle。
 
 ### 3.2 `status.rs` — agent 状态表与聚合（纯逻辑，可单测）
 
@@ -198,6 +211,8 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
   保证"崩溃"能被看到。Working 提到 Done 之前，避免长期存在的 done 终端压住
   仍在执行的任务——站立只表示有任务在执行。）
 - 输出 `Aggregate { status: Option<AgentStatus>, blocked, error, done, working, total }`。
+  聚合本身只输出状态与计数；宠物动画在 `Done` 上再按 Herdr 已读状态细分为
+  Review（至少一个 done 未读）与 Done（全部已读），见 3.1。
 - 聊天框的聚焦顺序（`ordered_with`）：只在 `live` 且 `status.is_some()` 的终端中
   排，分组为 1) blocked/error、2) 未读 done、3) 最近一次状态变化的 working、
   4) 其它；同一组取最早状态时间（working 组例外，取最近）。同一档内子 agent
@@ -226,7 +241,8 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
   先于父 agent，父 agent 处于更高档时仍优先。
 - herdr 语义：`done` 表示"你没看的时候完成了"；任一 Herdr 客户端查看后会转为
   `idle`。pet 只是事实订阅者，订阅是否触发该转换尚未实测，因此不要把 done→idle
-  当作必然事件；宠物播放一次 jumping 提醒后回到 idle 坐姿，等待下一次状态变化。
+  当作必然事件；宠物对未读 done 播放一次 jumping 后保持 review 站立，
+  Herdr 标记已读后回到坐姿，等待下一次状态变化。
 
 ### 3.3 `herdr.rs` — JSON-RPC 客户端
 
@@ -548,7 +564,8 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 单元测试（`cargo test`）：
 
 - `pet`：manifest 解析/默认值、尺寸校验、`frame_index` 边界、
-  一次性行动画接续、长待机随机动作、凝视角度与死区、11 行以下禁用凝视。
+  一次性行动画接续、review 的入场/循环与已读转坐姿、长待机随机动作、
+  凝视角度与死区、11 行以下禁用凝视。
 - `status`：聚合优先级、初始快照不提醒、进入 blocked/done 提醒、
   finished/lost 排除、真实事件 JSON 解析、气泡聚焦优先级与同组时间顺序、
   候选过滤与首个候选等于自动聚焦、`msg` / `app` 更新与清除、

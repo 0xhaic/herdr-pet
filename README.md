@@ -24,8 +24,8 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   变化作为「最后一次交互」的近似（herdr 没有逐标签页交互时间）。同一档内，子
   agent（`parent` 非空）排在其父 agent 前，因此 herdr 派发子 agent 后气泡与点击
   都指向子 agent；父 agent 若处于更高档（如 blocked/error）仍优先。宠物动画仍按
-  `Blocked > Error > Working > Done > Idle` 的聚合优先级，因此气泡和动画可能指向
-  不同 agent。
+  `Blocked > Error > Working > Done > Idle` 的聚合优先级（Done 再按 Herdr 已读
+  状态分为 review 站立与坐姿），因此气泡和动画可能指向不同 agent。
 - **会话切换**：有多个会话需要气泡（`blocked` / `working` / `error` / 未读 `done`）
   时，气泡右端显示左右箭头，点击按上述优先级在候选会话间循环切换。手动选择后气泡
   保持该会话，状态变化照常刷新它的两行文案；当它不再需要气泡（被处理、被 Herdr
@@ -41,12 +41,14 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
   的 tab 上打开浮层窗口，peek 不可用时回退到父会话所在的 tab。拖动宠物不会触发
   跳转。
   Herdr 在前台时聊天 UI 默认隐藏，点击宠物仍可跳转。
-- **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后回到坐姿、error 播放失败动作；
+- **状态动画**：working 奔跑、blocked 挥手等待、done 跳跃一次后进入 review 站立
+  （Herdr 未标记已读时循环，查看后回到坐姿）、error 播放失败动作；
   连续 idle 15–30 秒会随机做一次挥手/跳跃小动作（本项目增强）。
 - **鼠标悬停**：悬停时播放 3 次跳跃后坐姿待机，移开后恢复当前状态（与 Codex 一致）。
 - **鼠标凝视**：空闲时、以及 done 连续保持 30–90 秒的凝视窗口内（未悬停）宠物看向
   鼠标方向（16 个方向，需素材包含 look 行）；done 窗口结束后回到 idle 坐姿。
-  done 前 30 秒与窗口结束后不响应凝视。
+  done 前 30 秒与窗口结束后不响应凝视；未查看的 done 在 review 站立期间不凝视，
+  查看后若仍在窗口内，坐姿可立即凝视。
 - **提醒**：agent 进入 blocked / done 时弹系统通知并播放提示音（Basso / Glass）；
   是否提醒与是否播放音效可分别开关，同一帧内的多条提醒会合并。
 - **菜单栏控制**：显示/隐藏、设置、关于、退出；其它设置项统一放在设置面板中。
@@ -179,7 +181,8 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | --- | --- |
 | working | running（循环） |
 | blocked | waving 一次 → waiting（循环） |
-| done | jumping 一次 → 坐姿；连续 done 30 秒后开放 60 秒凝视窗口，窗口结束回 idle 坐姿 |
+| done（未查看） | jumping 一次 → review（循环站立）；Herdr 标记已读后直接回坐姿，不重播 jumping |
+| done（已查看） | jumping 一次 → 坐姿；连续 done 30 秒后开放 60 秒凝视窗口，窗口结束回 idle 坐姿 |
 | error | failed（循环） |
 | idle | idle（循环）；连续 idle 15–30 秒随机 waving / jumping 一次后回到 idle |
 | 拖动中 | running-left / running-right |
@@ -213,8 +216,9 @@ herdr-core 清除终端状态时（例如 agent 退出、root shell 回到前台
 - Herdr 在前台时无法通过箭头展开/收起气泡（按当前显示规则，整个聊天 UI 不可见）。
 - `done` 的已读状态读取 Herdr 的 `view.json`（每 500 ms，约 20 KB）：`attention`
   中 `seen` 为 false 或没有记录时按未读处理，气泡保留；Herdr 打开并查看该终端后
-  标记 seen，下一次轮询即消失。Herdr 未运行/该文件不可读时 done 会一直按未读处理；
-  此时没有查看入口，气泡会保留。该文件是 Herdr 的内部状态，非公开 CLI。
+  标记 seen，下一次轮询即消失，宠物同时从 review 站立回到坐姿。Herdr 未运行/该文件
+  不可读时 done 会一直按未读处理；此时没有查看入口，气泡会保留、宠物会保持 review
+  站立。该文件是 Herdr 的内部状态，非公开 CLI。
 - 「最后一次交互的 working」用该终端最近一次状态变化时间近似；herdr-core 不提供
   用户对标签页的交互时间戳，切换标签但状态未变化时不会更新这个顺序。
 - 不做点击养成/亲密度、herdr 终端内浮层、宠物生成。

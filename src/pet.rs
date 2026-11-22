@@ -276,6 +276,8 @@ pub enum Mood {
     Idle,
     Working,
     Blocked,
+    /// Done, but Herdr has not marked it seen yet.
+    Review,
     Done,
     Failed,
 }
@@ -296,6 +298,7 @@ pub enum Action {
     Failed,
     Waiting,
     Running,
+    Review,
 }
 
 impl Action {
@@ -309,6 +312,7 @@ impl Action {
             Action::Failed => 5,
             Action::Waiting => 6,
             Action::Running => 7,
+            Action::Review => 8,
         }
     }
 
@@ -321,6 +325,7 @@ impl Action {
             Action::Failed => &[140, 140, 140, 140, 140, 140, 140, 240],
             Action::Waiting => &[150, 150, 150, 150, 150, 260],
             Action::Running => &[120, 120, 120, 120, 120, 220],
+            Action::Review => &[150, 150, 150, 150, 150, 280],
         }
     }
 
@@ -329,18 +334,22 @@ impl Action {
             Mood::Idle => Action::Idle,
             Mood::Working => Action::Running,
             Mood::Blocked => Action::Waving,
-            Mood::Done => Action::Jumping,
+            Mood::Review | Mood::Done => Action::Jumping,
             Mood::Failed => Action::Failed,
         }
     }
 
     /// Status-entry rows that hand over to their looping row. Waving and
     /// jumping only appear as entries for Blocked and Done; ambient idle
-    /// gestures and hover reactions are tracked separately.
-    fn next_after_one_shot(self) -> Option<Self> {
+    /// gestures and hover reactions are tracked separately. Unseen Done
+    /// settles into the review loop; seen Done sits in idle.
+    fn next_after_one_shot(self, mood: Mood) -> Option<Self> {
         match self {
             Action::Waving => Some(Action::Waiting),
-            Action::Jumping => Some(Action::Idle),
+            Action::Jumping => Some(match mood {
+                Mood::Review => Action::Review,
+                _ => Action::Idle,
+            }),
             _ => None,
         }
     }
@@ -514,9 +523,12 @@ impl Animator {
     }
 
     fn enter_mood(&mut self, mood: Mood, now_ms: u64) {
-        self.done_gaze_ready = false;
+        // Viewing an unseen completion is not a new completion: settle straight
+        // into the sitting pose instead of replaying the one-shot jump.
+        let reviewed = self.mood == Mood::Review && mood == Mood::Done;
+        self.done_gaze_ready = reviewed;
         self.mood = mood;
-        if mood == Mood::Idle {
+        if mood == Mood::Idle || reviewed {
             self.begin_idle(now_ms);
         } else {
             self.base = Base::Mood;
@@ -558,7 +570,7 @@ impl Animator {
             Active::Base => match self.base {
                 Base::Mood => {
                     let next_frame = next_frame_deadline(self.row_started_ms, self.action, now_ms);
-                    if self.action.next_after_one_shot().is_some() {
+                    if self.action.next_after_one_shot(self.mood).is_some() {
                         include(next_frame.min(self.row_started_ms + self.action.total_ms()));
                     } else {
                         include(next_frame);
@@ -604,7 +616,9 @@ impl Animator {
     }
 
     pub fn update(&mut self, now_ms: u64, input: AnimInput) -> Frame {
-        if input.mood == Mood::Done {
+        if matches!(input.mood, Mood::Review | Mood::Done) {
+            // Review is still the aggregate Done status; the gaze window keeps
+            // counting from the first Done observation even while unviewed.
             self.done_since_ms.get_or_insert(now_ms);
         } else {
             self.done_since_ms = None;
@@ -675,7 +689,7 @@ impl Animator {
     fn advance_base(&mut self, now_ms: u64) {
         match self.base {
             Base::Mood => {
-                if let Some(next) = self.action.next_after_one_shot() {
+                if let Some(next) = self.action.next_after_one_shot(self.mood) {
                     let total = self.action.total_ms();
                     if now_ms.saturating_sub(self.row_started_ms) >= total {
                         self.action = next;
@@ -705,8 +719,8 @@ impl Animator {
 
     fn frame_at(&self, now_ms: u64) -> Frame {
         let elapsed = now_ms.saturating_sub(self.row_started_ms);
-        let one_shot =
-            self.action.next_after_one_shot().is_some() || matches!(self.base, Base::Ambient(_));
+        let one_shot = self.action.next_after_one_shot(self.mood).is_some()
+            || matches!(self.base, Base::Ambient(_));
         Frame {
             row: self.action.row(),
             col: frame_index(self.action, elapsed, one_shot) as u32,
@@ -1027,6 +1041,7 @@ mod tests {
         for (mood, entry_row, settled_row) in [
             (Mood::Working, 7, 7),
             (Mood::Blocked, 3, 6),
+            (Mood::Review, 4, 8),
             (Mood::Done, 4, 0),
             (Mood::Failed, 5, 5),
         ] {
@@ -1123,6 +1138,139 @@ mod tests {
         assert_eq!(
             animator.update(2520, input(Mood::Done, None, None)),
             Frame { row: 0, col: 1 }
+        );
+    }
+
+    #[test]
+    fn unseen_done_plays_jumping_then_review_loop() {
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, input(Mood::Review, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(839, input(Mood::Review, None, None)),
+            Frame { row: 4, col: 4 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 0 }
+        );
+        assert_eq!(
+            animator.update(990, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 1 }
+        );
+        assert_eq!(
+            animator.update(1869, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 5 }
+        );
+        assert_eq!(
+            animator.update(1870, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 0 }
+        );
+    }
+
+    #[test]
+    fn review_ignores_gaze_until_the_done_is_viewed() {
+        let mut animator = Animator::with_seed(true, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        assert_eq!(
+            animator.update(0, input(Mood::Review, None, Some(cell))),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Review, None, Some(cell))),
+            Frame { row: 8, col: 0 }
+        );
+        assert_eq!(
+            animator.update(90_000, input(Mood::Review, None, Some(cell))),
+            Frame {
+                row: 8,
+                col: frame_index(Action::Review, 90_000 - 840, false) as u32
+            }
+        );
+    }
+
+    #[test]
+    fn viewing_a_done_settles_without_replaying_jumping() {
+        let mut animator = Animator::with_seed(true, 0);
+        let cell = gaze_cell(100.0, 0.0).unwrap();
+
+        assert_eq!(
+            animator.update(0, input(Mood::Review, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 0 }
+        );
+        assert_eq!(
+            animator.update(1_000, input(Mood::Done, None, None)),
+            Frame { row: 0, col: 0 }
+        );
+
+        // The gaze window still counts from the first Done observation: half a
+        // minute after completion the sitting pet may look at the mouse.
+        assert_eq!(
+            animator.update(29_999, input(Mood::Done, None, Some(cell))),
+            Frame {
+                row: 0,
+                col: frame_index(Action::Idle, 28_999, false) as u32
+            }
+        );
+        assert_eq!(
+            animator.update(30_000, input(Mood::Done, None, Some(cell))),
+            Frame { row: 9, col: 4 }
+        );
+    }
+
+    #[test]
+    fn viewing_during_hover_still_settles_without_jumping() {
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, input(Mood::Review, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 0 }
+        );
+        // Hovering freezes the animator's mood; the seen flip arrives while
+        // the hover jumps are playing. Leaving hover must settle, not replay
+        // the completion jump.
+        assert_eq!(
+            animator.update(1_000, hover_input(Mood::Review, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(1_150, hover_input(Mood::Done, None)),
+            Frame { row: 4, col: 1 }
+        );
+        assert_eq!(
+            animator.update(1_200, input(Mood::Done, None, None)),
+            Frame { row: 0, col: 0 }
+        );
+    }
+
+    #[test]
+    fn a_new_unseen_done_after_seen_replays_jumping() {
+        let mut animator = Animator::new(true);
+        assert_eq!(
+            animator.update(0, input(Mood::Done, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(840, input(Mood::Done, None, None)),
+            Frame { row: 0, col: 0 }
+        );
+        assert_eq!(
+            animator.update(1_000, input(Mood::Review, None, None)),
+            Frame { row: 4, col: 0 }
+        );
+        assert_eq!(
+            animator.update(1_840, input(Mood::Review, None, None)),
+            Frame { row: 8, col: 0 }
         );
     }
 
