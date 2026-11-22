@@ -363,7 +363,8 @@ Socket 发现顺序：
   "notification_sound": true,
   "gaze": true,
   "click_through": false,
-  "chat_open": true
+  "chat_open": true,
+  "chat_opacity": 0.7
 }
 ```
 
@@ -376,6 +377,8 @@ Socket 发现顺序：
 - `click_through`：整窗点击穿透开关，默认 `false`（保持逐像素穿透 + 可拖拽）；
   开启后鼠标完全穿透到桌面，只能通过托盘关闭。
 - `chat_open`：聊天框展开状态，默认 `true`；点击宠物下方箭头按钮切换并写回。
+- `chat_opacity`：聊天气泡玻璃层的不透明度（0–1，越大越不透明），默认 `0.7`，非有限值
+  取默认；`0` 时玻璃层与描边完全透明、只显示文字。只在启动时读取，修改后重启生效。
 - 写入采用"临时文件 + rename"原子替换；写入失败只记日志，不阻塞 UI。
 
 ### 3.9 图标资产 — `.app` 图标与托盘剪影
@@ -411,8 +414,9 @@ Socket 发现顺序：
 - 窗口高度 = `8 + 64 + 16 + 宠物高 + 6 + 28 + 8`；收起只 `setHidden(true)` 气泡，
   不改变窗口尺寸或位置，宠物不会跳动。
 - 气泡用 `NSVisualEffectView`（`HUDWindow`、`BehindWindow`、`Active`）提供真实背景
-  模糊，叠加半透明深灰 `NSBox` 填充与 1px 白色低透明度描边；两行 `NSTextField`
-  13 pt（标题粗体白、副标题常规灰），固定 16 pt 行高，单行尾部省略。
+  模糊，不叠加填充底色，整体 `alphaValue` 取 `config.chat_opacity`（默认 0.7），仅保留
+  1px 白色低透明度描边；两行 `NSTextField` 13 pt（标题粗体白、副标题常规灰），固定
+  16 pt 行高，单行尾部省略。
   不用第二套 GUI 框架，也不在 wgpu 里伪造模糊。
 - 箭头按钮用同材质的圆形毛玻璃，chevron.down（展开）/ chevron.up（收起）为
   SF Symbol。
@@ -486,7 +490,8 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 - `chat`：三段布局尺寸与居中、随宠物高度增长、矩形命中、两行文案回退、
   单行折叠与截断。
 - `herdr_app`：`view.json` attention 的 seen 地址解析。
-- `main`：点击 vs 拖动阈值、聊天 UI 可见性（活跃 + Herdr 非前台）。
+- `main`：点击 vs 拖动阈值、聊天 UI 可见性（活跃 + Herdr 非前台）、`chat_opacity`
+  越界/非法值回落。
 - `herdr`：临时 Unix socket 假服务端，验证 hello → subscribe → 事件 → 重连。
 - `config`：默认值、round-trip、损坏文件回落。
 - `notify`：AppleScript 转义。

@@ -141,7 +141,7 @@ mod overlay {
     impl ChatOverlay {
         /// Attach the glass bubble and the toggle button to the winit view.
         /// Returns None when AppKit handles are unavailable.
-        pub fn new(window: &Window, open: bool) -> Option<Self> {
+        pub fn new(window: &Window, open: bool, opacity: f64) -> Option<Self> {
             let mtm = MainThreadMarker::new()?;
             let content = content_view(window)?;
             let container: Retained<ClickThroughView> = unsafe {
@@ -158,9 +158,10 @@ mod overlay {
             let (bubble, bubble_tint) = glass_view(
                 mtm,
                 BUBBLE_HEIGHT / 2.0,
-                NSColor::colorWithSRGBRed_green_blue_alpha(0.23, 0.26, 0.33, 0.62),
+                NSColor::clearColor(),
                 NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.09),
             );
+            bubble.setAlphaValue(opacity);
             let title = label(
                 mtm,
                 NSFont::boldSystemFontOfSize(13.0),
@@ -171,8 +172,11 @@ mod overlay {
                 NSFont::systemFontOfSize(13.0),
                 NSColor::colorWithCalibratedWhite_alpha(0.78, 0.88),
             );
-            bubble.addSubview(&title);
-            bubble.addSubview(&subtitle);
+            // Labels sit above the glass rather than inside it, so the
+            // bubble's own opacity does not fade the text.
+            container.addSubview(&bubble);
+            container.addSubview(&title);
+            container.addSubview(&subtitle);
 
             let (button, button_tint) = glass_view(
                 mtm,
@@ -184,7 +188,6 @@ mod overlay {
             chevron.setContentTintColor(Some(&NSColor::colorWithCalibratedWhite_alpha(1.0, 0.92)));
             button.addSubview(&chevron);
 
-            container.addSubview(&bubble);
             container.addSubview(&button);
             content.addSubview(&container);
 
@@ -204,10 +207,11 @@ mod overlay {
         /// Reflow in AppKit's bottom-left point coordinates from the top-left
         /// logical layout. Called on creation and whenever the window resizes.
         pub fn layout(&self, layout: &ChatLayout, height: f64) {
-            self.bubble.setFrame(NSRect::new(
+            let bubble = NSRect::new(
                 NSPoint::new(layout.bubble.x, height - layout.bubble.y - layout.bubble.h),
                 NSSize::new(layout.bubble.w, layout.bubble.h),
-            ));
+            );
+            self.bubble.setFrame(bubble);
             self.bubble_tint.setFrame(NSRect::new(
                 NSPoint::new(0.0, 0.0),
                 NSSize::new(layout.bubble.w, layout.bubble.h),
@@ -215,15 +219,15 @@ mod overlay {
             let text_width = BUBBLE_WIDTH - TEXT_INSET_X * 2.0;
             self.title.setFrame(NSRect::new(
                 NSPoint::new(
-                    TEXT_INSET_X,
-                    BUBBLE_HEIGHT - TITLE_INSET_TOP - TEXT_LINE_HEIGHT,
+                    bubble.origin.x + TEXT_INSET_X,
+                    bubble.origin.y + BUBBLE_HEIGHT - TITLE_INSET_TOP - TEXT_LINE_HEIGHT,
                 ),
                 NSSize::new(text_width, TEXT_LINE_HEIGHT),
             ));
             self.subtitle.setFrame(NSRect::new(
                 NSPoint::new(
-                    TEXT_INSET_X,
-                    BUBBLE_HEIGHT
+                    bubble.origin.x + TEXT_INSET_X,
+                    bubble.origin.y + BUBBLE_HEIGHT
                         - TITLE_INSET_TOP
                         - TEXT_LINE_HEIGHT
                         - TEXT_LINE_GAP
@@ -257,6 +261,8 @@ mod overlay {
         /// down when expanded, up when collapsed or auto-hidden.
         pub fn set_visible(&self, bubble: bool, button: bool) {
             self.bubble.setHidden(!bubble);
+            self.title.setHidden(!bubble);
+            self.subtitle.setHidden(!bubble);
             self.button.setHidden(!button);
             let symbol = if bubble { "chevron.down" } else { "chevron.up" };
             if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(

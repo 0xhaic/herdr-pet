@@ -23,7 +23,7 @@ pub struct ChatOverlay;
 
 #[cfg(not(target_os = "macos"))]
 impl ChatOverlay {
-    pub fn new(_window: &winit::window::Window, _open: bool) -> Option<Self> {
+    pub fn new(_window: &winit::window::Window, _open: bool, _opacity: f64) -> Option<Self> {
         None
     }
 

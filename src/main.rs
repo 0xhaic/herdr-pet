@@ -178,6 +178,14 @@ fn clamp_size(size: f64) -> f64 {
     }
 }
 
+fn clamp_chat_opacity(opacity: f64) -> f64 {
+    if opacity.is_finite() {
+        opacity.clamp(0.0, 1.0)
+    } else {
+        config::DEFAULT_CHAT_OPACITY
+    }
+}
+
 fn mood_for(status: Option<AgentStatus>) -> Mood {
     match status {
         Some(AgentStatus::Blocked) => Mood::Blocked,
@@ -267,6 +275,7 @@ impl App {
         mut config: Config,
     ) -> Self {
         config.size = clamp_size(config.size);
+        config.chat_opacity = clamp_chat_opacity(config.chat_opacity);
         let animator = Animator::new(config.gaze && pet.atlas.gaze_enabled());
         let pending_uv = pet.atlas.cell_uv(0, 0);
         let pets = pet::pet_dirs().unwrap_or_default();
@@ -890,7 +899,8 @@ impl ApplicationHandler for App {
             Ok(tray) => self.tray = Some(tray),
             Err(error) => eprintln!("herdr-pet: tray unavailable: {error:#}"),
         }
-        self.overlay = platform::ChatOverlay::new(&window, self.config.chat_open);
+        self.overlay =
+            platform::ChatOverlay::new(&window, self.config.chat_open, self.config.chat_opacity);
         if self.overlay.is_none() {
             eprintln!("herdr-pet: chat overlay unavailable");
         }
@@ -1062,6 +1072,14 @@ mod tests {
         assert!(within_click_slop((10.0, 10.0), (10.0, 10.0)));
         assert!(within_click_slop((10.0, 10.0), (12.0, 12.0)));
         assert!(!within_click_slop((10.0, 10.0), (13.1, 10.0)));
+    }
+
+    #[test]
+    fn chat_opacity_is_clamped_and_invalid_falls_back() {
+        assert_eq!(clamp_chat_opacity(0.4), 0.4);
+        assert_eq!(clamp_chat_opacity(-0.5), 0.0);
+        assert_eq!(clamp_chat_opacity(1.5), 1.0);
+        assert_eq!(clamp_chat_opacity(f64::NAN), config::DEFAULT_CHAT_OPACITY);
     }
 
     #[test]

@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SIZE: f64 = 104.0;
+/// Opacity of the chat bubble's glass layer; labels stay fully opaque.
+pub const DEFAULT_CHAT_OPACITY: f64 = 0.7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,6 +26,9 @@ pub struct Config {
     pub click_through: bool,
     /// Whether the chat bubble above the pet is expanded.
     pub chat_open: bool,
+    /// Opacity of the chat bubble's glass layer: 0.0 is fully transparent
+    /// (text only), 1.0 is fully opaque.
+    pub chat_opacity: f64,
 }
 
 impl Default for Config {
@@ -37,6 +42,7 @@ impl Default for Config {
             gaze: true,
             click_through: false,
             chat_open: true,
+            chat_opacity: DEFAULT_CHAT_OPACITY,
         }
     }
 }
@@ -151,6 +157,7 @@ mod tests {
         assert!(config.gaze);
         assert!(!config.click_through);
         assert!(config.chat_open);
+        assert_eq!(config.chat_opacity, 0.7);
     }
 
     #[test]
@@ -162,6 +169,7 @@ mod tests {
         assert!(config.gaze);
         assert!(!config.click_through);
         assert!(config.chat_open);
+        assert_eq!(config.chat_opacity, 0.7);
         assert_eq!(config.pet, None);
     }
 
@@ -178,6 +186,7 @@ mod tests {
             gaze: false,
             click_through: true,
             chat_open: false,
+            chat_opacity: 0.4,
         };
         config.save_to(&path).unwrap();
         assert_eq!(load_from(&path), config);

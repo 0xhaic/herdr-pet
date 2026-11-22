@@ -10,7 +10,8 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **状态汇总**：汇总本机所有 herdr agent，一只宠物显示最紧急的状态，优先级
   `Blocked > Error > Working > Done > Idle`（Working 高于 Done，站立只表示有任务在执行）。
 - **聊天框**：宠物上方固定两行的毛玻璃气泡，显示最紧急 agent 的任务标题与最新动作
-  （`status.msg`，缺省回退中文状态）。宠物右下角的箭头按钮收起/展开，开关写入配置。
+  （`status.msg`，缺省回退中文状态）。宠物右下角的箭头按钮收起/展开，开关写入配置；
+  气泡不透明度由 `chat_opacity` 配置，默认 `0.7`。
 - **气泡内容优先级**：`blocked`/`error` → 未读 `done` → 最近状态变化的 `working`
   → 其它。同一档取时间最早（blocked/error、未读 done）；`working` 取最近一次状态
   变化作为「最后一次交互」的近似（herdr 没有逐标签页交互时间）。宠物动画仍按
@@ -129,7 +130,8 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
   "notification_sound": true,
   "gaze": true,
   "click_through": false,
-  "chat_open": true
+  "chat_open": true,
+  "chat_opacity": 0.7
 }
 ```
 
@@ -143,6 +145,7 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 | `gaze` | `true` | 凝视开关（idle 与 done 凝视窗口；素材无 look 行时自动禁用） |
 | `click_through` | `false` | 整窗点击穿透；开启后宠物不可拖拽 |
 | `chat_open` | `true` | 聊天框是否展开；宠物右下角箭头按钮切换并写回。仅在聊天 UI 可见时生效 |
+| `chat_opacity` | `0.7` | 聊天气泡玻璃层的不透明度（0–1，越大越不透明）；`0` 时只显示文字，修改后重启生效 |
 
 ## 状态与动画
 
