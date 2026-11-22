@@ -395,6 +395,12 @@ fn chat_ui_available(is_active: bool, herdr_frontmost: bool) -> bool {
     is_active && !herdr_frontmost
 }
 
+/// Blocked/error agents and unseen done force the bubble open regardless of
+/// Herdr being frontmost or the user having collapsed it.
+fn chat_bubble_visible(chat_enabled: bool, chat_open: bool, forced: bool) -> bool {
+    forced || (chat_enabled && chat_open)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct WindowSnapshot {
     origin: PhysicalPosition<i32>,
@@ -432,9 +438,15 @@ struct App {
     herdr_frontmost: bool,
     next_front_check: Instant,
     /// Whether the chat UI should exist: an active agent and Herdr not
-    /// frontmost. When false, both the bubble and the button are hidden and
-    /// their rects stop taking clicks.
+    /// frontmost. When false, the bubble and the button are hidden unless
+    /// `chat_forced` keeps the bubble open, and their rects stop taking
+    /// clicks.
     chat_enabled: bool,
+    /// A live agent is blocked/errored or done and unseen: the bubble stays
+    /// open even if Herdr is frontmost or the user collapsed it, until the
+    /// agent is handled or the done tab is viewed. The button still follows
+    /// `chat_enabled`.
+    chat_forced: bool,
     /// Pet press origin, kept so a release without movement opens Herdr.
     click_candidate: Option<(f64, f64)>,
     started: Instant,
@@ -494,6 +506,7 @@ impl App {
             herdr_frontmost: false,
             next_front_check: Instant::now(),
             chat_enabled: false,
+            chat_forced: false,
             click_candidate: None,
             started: Instant::now(),
             next_tick: Instant::now(),
@@ -593,27 +606,27 @@ impl App {
         let Some((x, y)) = self.local_point(pointer) else {
             return;
         };
-        if self.chat_enabled {
-            if self.chat_layout.button.contains(x, y) {
-                self.toggle_chat();
-                return;
-            }
-            if self.config.chat_open && self.chat_layout.bubble.contains(x, y) {
-                self.focus_herdr_chat();
-                return;
-            }
+        if self.chat_enabled && self.chat_layout.button.contains(x, y) {
+            self.toggle_chat();
+            return;
+        }
+        if self.bubble_visible() && self.chat_layout.bubble.contains(x, y) {
+            self.focus_herdr_chat();
+            return;
         }
         if self.chat_layout.pet.contains(x, y) {
             self.start_drag();
         }
     }
 
+    fn bubble_visible(&self) -> bool {
+        chat_bubble_visible(self.chat_enabled, self.config.chat_open, self.chat_forced)
+    }
+
     fn apply_chat_visibility(&mut self) {
+        let bubble = self.bubble_visible();
         if let Some(overlay) = &self.overlay {
-            overlay.set_visible(
-                self.chat_enabled && self.config.chat_open,
-                self.chat_enabled,
-            );
+            overlay.set_visible(bubble, self.chat_enabled);
         }
         self.next_tick = Instant::now();
     }
@@ -635,15 +648,22 @@ impl App {
 
     /// The chat UI exists only while an agent needs attention and Herdr is not
     /// frontmost (or not running). Done agents count until Herdr marks them
-    /// seen; blocked/working/error always count.
+    /// seen; blocked/working/error always count. Blocked/error agents and
+    /// unseen done also force the bubble open while Herdr is frontmost or the
+    /// bubble is collapsed.
     fn update_chat_enabled(&mut self) {
         let seen = &self.herdr_attention.seen;
         let active = self.table.is_active_with(|address| !seen.contains(address));
         let enabled = chat_ui_available(active, self.herdr_frontmost);
-        if enabled == self.chat_enabled {
+        let forced = self.table.has_blocked_or_error()
+            || self
+                .table
+                .has_unseen_done(|address| !seen.contains(address));
+        if enabled == self.chat_enabled && forced == self.chat_forced {
             return;
         }
         self.chat_enabled = enabled;
+        self.chat_forced = forced;
         self.last_anim_input = None;
         self.apply_chat_visibility();
     }
@@ -688,7 +708,7 @@ impl App {
     }
 
     fn sync_chat(&mut self) {
-        if !self.chat_enabled || !self.config.chat_open {
+        if !self.bubble_visible() {
             return;
         }
         let text = chat_text(self.focus_agent());
@@ -722,10 +742,7 @@ impl App {
         }
         if let Some(overlay) = &self.overlay {
             overlay.layout(&self.chat_layout, f64::from(size.height) / scale);
-            overlay.set_visible(
-                self.chat_enabled && self.config.chat_open,
-                self.chat_enabled,
-            );
+            overlay.set_visible(self.bubble_visible(), self.chat_enabled);
         }
         self.overlay_key = Some(key);
         self.force_redraw = true;
@@ -850,9 +867,8 @@ impl App {
             return;
         };
         let layout = &self.chat_layout;
-        if self.chat_enabled
-            && (layout.button.contains(x, y)
-                || (self.config.chat_open && layout.bubble.contains(x, y)))
+        if (self.chat_enabled && layout.button.contains(x, y))
+            || (self.bubble_visible() && layout.bubble.contains(x, y))
         {
             self.set_cursor_hittest(true);
             return;
@@ -1442,6 +1458,18 @@ mod tests {
         assert!(!chat_ui_available(true, true));
         assert!(!chat_ui_available(false, false));
         assert!(!chat_ui_available(false, true));
+    }
+
+    #[test]
+    fn forced_agents_show_the_bubble_even_when_hidden_or_collapsed() {
+        assert!(chat_bubble_visible(true, true, false));
+        assert!(!chat_bubble_visible(true, false, false));
+        assert!(!chat_bubble_visible(false, true, false));
+        assert!(!chat_bubble_visible(false, false, false));
+        assert!(chat_bubble_visible(false, false, true));
+        assert!(chat_bubble_visible(false, true, true));
+        assert!(chat_bubble_visible(true, false, true));
+        assert!(chat_bubble_visible(true, true, true));
     }
 
     fn pet_in_window() -> Rect {

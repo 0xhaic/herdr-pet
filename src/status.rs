@@ -452,6 +452,27 @@ impl StatusTable {
         })
     }
 
+    /// Whether any live agent is blocked or errored. These states wait for the
+    /// person, so the chat bubble shows them even while Herdr is frontmost or
+    /// the bubble is collapsed.
+    pub fn has_blocked_or_error(&self) -> bool {
+        self.terminals.values().any(|agent| {
+            agent.live
+                && matches!(
+                    agent.status,
+                    Some(AgentStatus::Blocked | AgentStatus::Error)
+                )
+        })
+    }
+
+    /// Whether any live agent finished and Herdr has not marked it seen yet.
+    /// Like blocked/error, these force the bubble open until viewed.
+    pub fn has_unseen_done(&self, unseen_done: impl Fn(&str) -> bool) -> bool {
+        self.terminals.values().any(|agent| {
+            agent.live && agent.status == Some(AgentStatus::Done) && unseen_done(&agent.address)
+        })
+    }
+
     pub fn aggregate(&self) -> Aggregate {
         let mut aggregate = Aggregate::default();
         for agent in self.terminals.values() {
@@ -561,6 +582,46 @@ mod tests {
             terminal("t2", "live", Some("working")),
         ]);
         assert!(mixed.is_active_with(|_| false));
+    }
+
+    #[test]
+    fn blocked_or_error_agents_need_manual_attention() {
+        let table = |state: Option<&str>| {
+            let mut table = StatusTable::new();
+            if let Some(state) = state {
+                table.apply_snapshot(vec![terminal("t1", "live", Some(state))]);
+            }
+            table
+        };
+        for state in ["blocked", "error"] {
+            assert!(table(Some(state)).has_blocked_or_error(), "{state}");
+        }
+        for state in ["idle", "done", "working"] {
+            assert!(!table(Some(state)).has_blocked_or_error(), "{state}");
+        }
+        assert!(!table(None).has_blocked_or_error());
+
+        let mut finished = StatusTable::new();
+        finished.apply_snapshot(vec![terminal("t1", "finished", Some("blocked"))]);
+        assert!(!finished.has_blocked_or_error());
+    }
+
+    #[test]
+    fn unseen_done_agents_force_attention_until_seen() {
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal("t1", "live", Some("done"))]);
+        assert!(table.has_unseen_done(|address| address == "t1"));
+        assert!(!table.has_unseen_done(|_| false));
+
+        for state in ["blocked", "error", "working", "idle"] {
+            let mut table = StatusTable::new();
+            table.apply_snapshot(vec![terminal("t1", "live", Some(state))]);
+            assert!(!table.has_unseen_done(|_| true), "{state}");
+        }
+
+        let mut finished = StatusTable::new();
+        finished.apply_snapshot(vec![terminal("t1", "finished", Some("done"))]);
+        assert!(!finished.has_unseen_done(|_| true));
     }
 
     #[test]

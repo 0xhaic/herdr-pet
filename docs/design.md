@@ -458,11 +458,18 @@ Socket 发现顺序：
 - 状态：`config.chat_open` 默认 true；点击箭头切换并写回，不新增托盘菜单项。
 - 可用性：`chat_ui = active && !herdr_frontmost`。`active` 指任一 live agent 处于
   `blocked` / `working` / `error`，或处于 `done` 且 Herdr 尚未标记已读；
-  `herdr_frontmost` 由 NSWorkspace 判断，Herdr 未启动时为 false。两者共同决定：
-  仅当存在活跃 agent 且 Herdr 不在前台时可用。不可用时气泡和按钮都
-  `setHidden(true)`，两者矩形退出逐像素命中（点击穿透）；宠物本体保留，点击宠物
-  仍会拉起 Herdr。可用时按钮显示，气泡按 `config.chat_open` 决定；Herdr 在前台时
-  无法展开/收起。
+  `herdr_frontmost` 由 NSWorkspace 判断，Herdr 未启动时为 false。`chat_ui` 控制
+  按钮：可用时按钮显示并按 `config.chat_open` 决定气泡；不可用时按钮
+  `setHidden(true)` 并退出逐像素命中。
+- 强制显示：任一 live agent 处于 `blocked` / `error`，或处于 `done` 且 Herdr 尚未
+  标记已读时 `forced = true`，气泡在 `forced || (chat_ui && chat_open)` 时显示。
+  因此 Herdr 在前台、或用户已收起气泡时，阻塞/出错与未读完成的提示仍会弹出；该
+  状态只随 agent 离开 `blocked` / `error`（被手动处理）或未读 done 被 Herdr 标记
+  已读而回落，之后恢复 `chat_ui && chat_open`。强制气泡参与逐像素命中，点击照常
+  拉起 Herdr 并跳到该 agent；按钮仍只随 `chat_ui` 显示，所以 Herdr 在前台时无法
+  展开/收起。
+- 不可见时气泡矩形退出逐像素命中（点击穿透）；宠物本体保留，点击宠物仍会拉起
+  Herdr。
 - done 未读：读取 Herdr 的 `view.json` → `attention[address].seen`。seen=false 或
   没有该终端记录时视为未读；Herdr 查看后 seen=true，下一次 500 ms 轮询即不再算
   活跃。文件不可读时保持全部 done 未读（气泡保留），避免静默丢完成提醒。
@@ -471,7 +478,8 @@ Socket 发现顺序：
 - 渲染：宠物 quad 只占布局中的宠物格；子矩形由 App 每帧换算成裁剪空间坐标传给
   shader，窗口其余区域保持透明。悬停、凝视中心与逐像素穿透都改用宠物格坐标。
 - 测试锚点：布局尺寸/居中/随高度增长、矩形半开区间、气泡聚焦优先级与同组时间
-  顺序、`msg` 跟随 status 更新/清除、单行折叠与截断。
+  顺序、`msg` 跟随 status 更新/清除、单行折叠与截断、blocked/error 与未读 done
+  强制显示及前台/收起组合。
 
 ### 3.11 `herdr_app.rs` — 已读状态与点击跳转
 
