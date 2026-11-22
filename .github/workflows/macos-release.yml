@@ -27,6 +27,15 @@ jobs:
             exit 1
           fi
 
+      - name: Check release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes" ]; then
+            echo "missing release notes: $notes" >&2
+            exit 1
+          fi
+
       - name: Add arm64 target
         run: rustup target add aarch64-apple-darwin
 
@@ -71,9 +80,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
+          notes="docs/release-notes/$tag.md"
           if gh release view "$tag" > /dev/null 2>&1; then
+            gh release edit "$tag" --notes-file "$notes"
             gh release upload "$tag" dist/*.dmg --clobber
           else
-            gh release create "$tag" dist/*.dmg --title "$tag" \
-              --notes "macOS arm64 DMG，未签名/未公证。首次启动请右键 → 打开，或执行：xattr -dr com.apple.quarantine /Applications/herdr-pet.app"
+            gh release create "$tag" dist/*.dmg --title "$tag" --notes-file "$notes"
           fi
