@@ -372,6 +372,20 @@ pub fn frame_index(action: Action, elapsed_ms: u64, one_shot: bool) -> usize {
     durations.len() - 1
 }
 
+/// Absolute start of the next cell in a looping action.
+fn next_frame_deadline(started_ms: u64, action: Action, now_ms: u64) -> u64 {
+    let durations = action.durations();
+    let total = action.total_ms();
+    let elapsed = now_ms.saturating_sub(started_ms);
+    let frame_elapsed = elapsed % total;
+    let index = frame_index(action, frame_elapsed, false);
+    let frame_started = durations[..index]
+        .iter()
+        .map(|&duration| u64::from(duration))
+        .sum::<u64>();
+    started_ms + elapsed - frame_elapsed + frame_started + u64::from(durations[index])
+}
+
 /// A gaze target cell: 0-7 in look row 9, 8-15 in look row 10.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GazeCell(u8);
@@ -528,6 +542,65 @@ impl Animator {
             }
             _ => false,
         }
+    }
+
+    /// Next absolute animation time that can change state without new input.
+    /// Gaze and pointer hit-testing remain input-driven between these deadlines.
+    pub fn next_deadline_ms(&self, now_ms: u64) -> Option<u64> {
+        let elapsed = now_ms.saturating_sub(self.row_started_ms);
+        let mut deadline = None;
+        let mut include = |candidate: u64| {
+            if candidate > now_ms {
+                deadline = Some(deadline.map_or(candidate, |current: u64| current.min(candidate)));
+            }
+        };
+        match self.active {
+            Active::Base => match self.base {
+                Base::Mood => {
+                    let next_frame = next_frame_deadline(self.row_started_ms, self.action, now_ms);
+                    if self.action.next_after_one_shot().is_some() {
+                        include(next_frame.min(self.row_started_ms + self.action.total_ms()));
+                    } else {
+                        include(next_frame);
+                    }
+                    if self.mood == Mood::Idle && self.action == Action::Idle {
+                        include(self.next_idle_action_ms);
+                    }
+                }
+                Base::Ambient(gesture) => include(self.row_started_ms + gesture.total_ms()),
+            },
+            Active::Drag(direction) => {
+                let action = match direction {
+                    DragDir::Left => Action::RunningLeft,
+                    DragDir::Right => Action::RunningRight,
+                };
+                include(next_frame_deadline(self.row_started_ms, action, now_ms));
+            }
+            Active::Hover => {
+                let jump = Action::Jumping.total_ms();
+                if elapsed < HOVER_JUMPS * jump {
+                    include(next_frame_deadline(
+                        self.row_started_ms + (elapsed / jump) * jump,
+                        Action::Jumping,
+                        now_ms,
+                    ));
+                } else {
+                    include(next_frame_deadline(
+                        self.row_started_ms + HOVER_JUMPS * jump,
+                        Action::Idle,
+                        now_ms,
+                    ));
+                }
+            }
+            Active::Look => {}
+        }
+        if self.mood == Mood::Done
+            && let Some(since) = self.done_since_ms
+        {
+            include(since + DONE_GAZE_DELAY_MS);
+            include(since + DONE_GAZE_DELAY_MS + DONE_GAZE_WINDOW_MS);
+        }
+        deadline
     }
 
     pub fn update(&mut self, now_ms: u64, input: AnimInput) -> Frame {
@@ -703,6 +776,30 @@ mod tests {
             gaze,
             hover: true,
         }
+    }
+
+    #[test]
+    fn deadlines_cover_idle_one_shots_hover_and_done_gaze() {
+        let mut animator = Animator::with_seed(true, 1);
+        animator.update(0, input(Mood::Idle, None, None));
+        assert_eq!(animator.next_deadline_ms(0), Some(1680));
+        assert_eq!(animator.next_deadline_ms(1680), Some(2340));
+
+        animator.update(1000, input(Mood::Done, None, None));
+        assert_eq!(animator.next_deadline_ms(1000), Some(1140));
+        assert_eq!(
+            animator.next_deadline_ms(30_999),
+            Some(31_000),
+            "Done's gaze window must open on time"
+        );
+
+        animator.update(0, hover_input(Mood::Idle, None));
+        assert_eq!(animator.next_deadline_ms(0), Some(140));
+        assert_eq!(
+            animator.next_deadline_ms(2_520),
+            Some(4_200),
+            "After three jumps, idle has its own frame boundaries"
+        );
     }
 
     #[test]

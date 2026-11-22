@@ -589,6 +589,7 @@ mod settings {
             if !self.window.isVisible() {
                 self.monitor = None;
                 self.monitor_arm_at = None;
+                return Vec::new();
             } else if self.monitor.is_none()
                 && self
                     .monitor_arm_at

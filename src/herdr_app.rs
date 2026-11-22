@@ -52,10 +52,11 @@ pub fn spawn_attention(sender: Sender<Attention>) {
         .spawn(move || {
             let path = app_home().map(|home| home.join("view.json"));
             let mut last = Attention::default();
+            let mut last_metadata = None;
             loop {
                 let next = path
                     .as_deref()
-                    .and_then(read_attention)
+                    .and_then(|path| read_attention_if_changed(path, &mut last_metadata))
                     .unwrap_or_else(|| last.clone());
                 if next != last {
                     last = next;
@@ -69,6 +70,20 @@ pub fn spawn_attention(sender: Sender<Attention>) {
     if let Err(error) = thread {
         eprintln!("herdr-pet: cannot start the Herdr.app attention thread: {error}");
     }
+}
+
+fn read_attention_if_changed(
+    path: &Path,
+    last_metadata: &mut Option<(std::time::SystemTime, u64)>,
+) -> Option<Attention> {
+    let metadata = fs::metadata(path).ok()?;
+    let current = (metadata.modified().ok()?, metadata.len());
+    if *last_metadata == Some(current) {
+        return None;
+    }
+    let attention = read_attention(path)?;
+    *last_metadata = Some(current);
+    Some(attention)
 }
 
 fn read_attention(path: &Path) -> Option<Attention> {
@@ -181,5 +196,29 @@ mod tests {
             BTreeSet::from(["t2".to_owned(), "machine/t3".to_owned()])
         );
         assert!(!attention.seen.contains("t1"));
+    }
+
+    #[test]
+    fn skips_reading_when_file_metadata_is_unchanged() {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-pet-attention-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, r#"{"attention":{"t1":{"seen":true}}}"#).unwrap();
+        let mut metadata = None;
+        let first = read_attention_if_changed(&path, &mut metadata).unwrap();
+        assert!(first.seen.contains("t1"));
+        assert!(read_attention_if_changed(&path, &mut metadata).is_none());
+
+        fs::write(&path, r#"{"attention":{"t1":{"seen":false}}}"#).unwrap();
+        assert_eq!(
+            read_attention_if_changed(&path, &mut metadata),
+            Some(Attention::default())
+        );
+        let _ = fs::remove_file(path);
     }
 }

@@ -237,6 +237,30 @@ fn chat_ui_available(is_active: bool, herdr_frontmost: bool) -> bool {
     is_active && !herdr_frontmost
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WindowSnapshot {
+    origin: PhysicalPosition<i32>,
+    size: winit::dpi::PhysicalSize<u32>,
+    scale: f64,
+}
+
+impl WindowSnapshot {
+    fn new(window: &Window) -> Option<Self> {
+        Some(Self {
+            origin: window.outer_position().ok()?,
+            size: window.inner_size(),
+            scale: window.scale_factor(),
+        })
+    }
+
+    fn local_point(self, pointer: (f64, f64)) -> (f64, f64) {
+        (
+            (pointer.0 - f64::from(self.origin.x)) / self.scale,
+            (pointer.1 - f64::from(self.origin.y)) / self.scale,
+        )
+    }
+}
+
 struct App {
     pet: Pet,
     window: Option<Arc<Window>>,
@@ -266,6 +290,7 @@ struct App {
     force_redraw: bool,
     config: Config,
     dragging: Option<Drag>,
+    cursor_hittest: Option<bool>,
     primary_height: f64,
     primary_scale: f64,
     tray: Option<tray::Tray>,
@@ -275,6 +300,10 @@ struct App {
     pets: Vec<PathBuf>,
     pet_index: usize,
     chat_layout: ChatLayout,
+    mood: Option<AgentStatus>,
+    last_anim_input: Option<AnimInput>,
+    next_anim_ms: u64,
+    frame: Frame,
     overlay: Option<platform::ChatOverlay>,
     /// Window size, scale, and layout the native views were last fitted to.
     overlay_key: Option<(u32, u32, u64, ChatLayout)>,
@@ -315,6 +344,7 @@ impl App {
             force_redraw: true,
             config,
             dragging: None,
+            cursor_hittest: None,
             primary_height: 0.0,
             primary_scale: 1.0,
             tray: None,
@@ -323,6 +353,10 @@ impl App {
             pets,
             pet_index,
             chat_layout,
+            mood: None,
+            last_anim_input: None,
+            next_anim_ms: 0,
+            frame: Frame { row: 0, col: 0 },
             overlay: None,
             overlay_key: None,
             last_chat_text: None,
@@ -342,6 +376,8 @@ impl App {
                 HerdrMessage::Disconnected => {}
             }
         }
+        self.mood = self.table.aggregate().status;
+        self.last_anim_input = None;
         if self.config.notifications && !changes.is_empty() {
             notify::announce(&changes, self.config.notification_sound);
         }
@@ -372,13 +408,19 @@ impl App {
 
     /// Pointer position in window-local logical points, top-left origin.
     fn local_point(&self, pointer: (f64, f64)) -> Option<(f64, f64)> {
-        let window = self.window.as_ref()?;
-        let position = window.outer_position().ok()?;
-        let scale = window.scale_factor();
-        Some((
-            (pointer.0 - f64::from(position.x)) / scale,
-            (pointer.1 - f64::from(position.y)) / scale,
-        ))
+        let snapshot = WindowSnapshot::new(self.window.as_ref()?)?;
+        Some(snapshot.local_point(pointer))
+    }
+
+    fn set_cursor_hittest(&mut self, hittest: bool) {
+        if self.cursor_hittest == Some(hittest) {
+            return;
+        }
+        let Some(window) = &self.window else {
+            return;
+        };
+        let _ = window.set_cursor_hittest(hittest);
+        self.cursor_hittest = Some(hittest);
     }
 
     /// Left press: the button toggles the bubble, the bubble opens Herdr at
@@ -444,6 +486,7 @@ impl App {
             return;
         }
         self.chat_enabled = enabled;
+        self.last_anim_input = None;
         self.apply_chat_visibility();
     }
 
@@ -487,6 +530,9 @@ impl App {
     }
 
     fn sync_chat(&mut self) {
+        if !self.chat_enabled || !self.config.chat_open {
+            return;
+        }
         let text = chat_text(self.focus_agent());
         if self.last_chat_text.as_ref() == Some(&text) {
             return;
@@ -566,7 +612,7 @@ impl App {
                 dir: DragDir::Right,
             });
             self.click_candidate = Some(pointer);
-            let _ = window.set_cursor_hittest(true);
+            self.set_cursor_hittest(true);
         }
     }
 
@@ -600,71 +646,41 @@ impl App {
         self.dragging = Some(drag);
     }
 
-    fn gaze(&self, pointer: Option<(f64, f64)>) -> Option<GazeCell> {
-        if self.dragging.is_some() {
-            return None;
-        }
-        let window = self.window.as_ref()?;
-        if !window.is_visible().unwrap_or(true) {
+    fn gaze(&self, snapshot: WindowSnapshot, pointer: Option<(f64, f64)>) -> Option<GazeCell> {
+        if self.dragging.is_some() || snapshot.size.width == 0 || snapshot.size.height == 0 {
             return None;
         }
         let pointer = pointer?;
-        let position = window.outer_position().ok()?;
-        let size = window.inner_size();
-        if size.width == 0 || size.height == 0 {
-            return None;
-        }
-        let scale = window.scale_factor();
         // Gaze pivots on the pet cell, not the taller window centre.
         let (center_x, center_y) = self.chat_layout.pet.center();
-        let center_x = position.x as f64 + center_x * scale;
-        let center_y = position.y as f64 + center_y * scale;
+        let center_x = snapshot.origin.x as f64 + center_x * snapshot.scale;
+        let center_y = snapshot.origin.y as f64 + center_y * snapshot.scale;
         gaze_cell(
-            ((pointer.0 - center_x) / scale) as f32,
-            ((pointer.1 - center_y) / scale) as f32,
+            ((pointer.0 - center_x) / snapshot.scale) as f32,
+            ((pointer.1 - center_y) / snapshot.scale) as f32,
         )
     }
 
-    /// Codex treats the pet's bounding box as the hover target; only the sprite
-    /// cell counts, not the bubble or the transparent margins.
-    fn hovered(&self, pointer: Option<(f64, f64)>) -> bool {
+    fn hovered(&self, local: Option<(f64, f64)>) -> bool {
         if self.dragging.is_some() {
             return false;
         }
-        let Some(window) = self.window.as_ref() else {
-            return false;
-        };
-        if !window.is_visible().unwrap_or(true) {
-            return false;
-        }
-        let Some(pointer) = pointer else {
-            return false;
-        };
-        let Some((x, y)) = self.local_point(pointer) else {
+        let Some((x, y)) = local else {
             return false;
         };
         self.chat_layout.pet.contains(x, y)
     }
 
-    fn update_cursor(&self, pointer: Option<(f64, f64)>, frame: Frame) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        if !window.is_visible().unwrap_or(true) {
-            return;
-        }
+    fn update_cursor(&mut self, local: Option<(f64, f64)>, frame: Frame) {
         if self.dragging.is_some() {
-            let _ = window.set_cursor_hittest(true);
+            self.set_cursor_hittest(true);
             return;
         }
         if self.config.click_through {
-            let _ = window.set_cursor_hittest(false);
+            self.set_cursor_hittest(false);
             return;
         }
-        let Some(pointer) = pointer else {
-            return;
-        };
-        let Some((x, y)) = self.local_point(pointer) else {
+        let Some((x, y)) = local else {
             return;
         };
         let layout = &self.chat_layout;
@@ -672,11 +688,11 @@ impl App {
             && (layout.button.contains(x, y)
                 || (self.config.chat_open && layout.bubble.contains(x, y)))
         {
-            let _ = window.set_cursor_hittest(true);
+            self.set_cursor_hittest(true);
             return;
         }
         if !layout.pet.contains(x, y) {
-            let _ = window.set_cursor_hittest(false);
+            self.set_cursor_hittest(false);
             return;
         }
         let alpha = self.pet.atlas.alpha_at_view(
@@ -687,7 +703,7 @@ impl App {
             layout.pet.w,
             layout.pet.h,
         );
-        let _ = window.set_cursor_hittest(alpha.is_some_and(|alpha| alpha >= CLICK_ALPHA));
+        self.set_cursor_hittest(alpha.is_some_and(|alpha| alpha >= CLICK_ALPHA));
     }
 
     /// Advance input and animation state on every tick, but only ask for a
@@ -707,26 +723,32 @@ impl App {
         self.drain_attention();
         self.refresh_herdr_frontmost();
         self.update_chat_enabled();
-        self.sync_chat();
         self.sync_overlay();
         let pointer = self.pointer();
+        let snapshot = self.window.as_deref().and_then(WindowSnapshot::new);
+        let local = snapshot
+            .zip(pointer)
+            .map(|(snapshot, pointer)| snapshot.local_point(pointer));
         self.update_drag(pointer);
-        let mood = mood_for(self.table.aggregate().status);
-        let gaze = self.gaze(pointer);
-        let hover = self.hovered(pointer);
+        let gaze = snapshot.and_then(|snapshot| self.gaze(snapshot, pointer));
+        let hover = self.hovered(local);
         let dragging = self.dragging.map(|drag| drag.dir);
+        let input = AnimInput {
+            mood: mood_for(self.mood),
+            dragging,
+            gaze,
+            hover,
+        };
         let now_ms = self.started.elapsed().as_millis() as u64;
-        let frame = self.animator.update(
-            now_ms,
-            AnimInput {
-                mood,
-                dragging,
-                gaze,
-                hover,
-            },
-        );
+        if self.last_anim_input != Some(input) || now_ms >= self.next_anim_ms {
+            self.frame = self.animator.update(now_ms, input);
+            self.next_anim_ms = self.animator.next_deadline_ms(now_ms).unwrap_or(u64::MAX);
+            self.last_anim_input = Some(input);
+            self.sync_chat();
+        }
+        let frame = self.frame;
 
-        self.update_cursor(pointer, frame);
+        self.update_cursor(local, frame);
         let uv = self.pet.atlas.cell_uv(frame.row, frame.col);
         if self.force_redraw || self.presented_uv != Some(uv) {
             self.pending_uv = uv;
@@ -769,7 +791,8 @@ impl App {
                         let visible = window.is_visible().unwrap_or(true);
                         window.set_visible(!visible);
                         if visible {
-                            let _ = window.set_cursor_hittest(!self.config.click_through);
+                            self.cursor_hittest = None;
+                            self.set_cursor_hittest(!self.config.click_through);
                         } else {
                             self.force_redraw = true;
                         }
@@ -880,6 +903,7 @@ impl App {
         self.config.gaze = enabled;
         self.animator
             .set_look_enabled(enabled && self.pet.atlas.gaze_enabled());
+        self.last_anim_input = None;
         self.save_config();
         self.sync_panel();
     }
@@ -889,9 +913,7 @@ impl App {
         if enabled {
             self.dragging = None;
         }
-        if let Some(window) = &self.window {
-            let _ = window.set_cursor_hittest(!enabled);
-        }
+        self.set_cursor_hittest(!enabled);
         self.save_config();
         self.sync_panel();
     }
@@ -943,6 +965,7 @@ impl App {
     fn install_pet(&mut self, pet: Pet) {
         self.pet = pet;
         self.animator = Animator::new(self.config.gaze && self.pet.atlas.gaze_enabled());
+        self.last_anim_input = None;
         self.config.pet = Some(pet_spec(&self.pet, self.config.pets_dir.as_deref()));
         if let Some(renderer) = &mut self.renderer {
             renderer.replace_atlas(&self.pet.atlas);
@@ -1060,6 +1083,8 @@ impl ApplicationHandler for App {
         self.pending_uv = self.pet.atlas.cell_uv(0, 0);
         self.force_redraw = true;
         self.window = Some(window);
+        self.cursor_hittest = None;
+        self.set_cursor_hittest(!self.config.click_through);
         self.herdr_frontmost = platform::herdr_app_frontmost();
         self.next_front_check = Instant::now() + FRONT_CHECK_INTERVAL;
         self.sync_overlay();
@@ -1221,6 +1246,16 @@ mod tests {
         assert!(within_click_slop((10.0, 10.0), (10.0, 10.0)));
         assert!(within_click_slop((10.0, 10.0), (12.0, 12.0)));
         assert!(!within_click_slop((10.0, 10.0), (13.1, 10.0)));
+    }
+
+    #[test]
+    fn window_snapshot_converts_pointer_with_one_geometry_sample() {
+        let snapshot = WindowSnapshot {
+            origin: PhysicalPosition::new(1000, 500),
+            size: winit::dpi::PhysicalSize::new(672, 400),
+            scale: 2.0,
+        };
+        assert_eq!(snapshot.local_point((1100.0, 600.0)), (50.0, 50.0));
     }
 
     #[test]
