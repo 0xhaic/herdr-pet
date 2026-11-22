@@ -4,8 +4,9 @@
 mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{
-    ChatOverlay, SettingsPanel, float_on_all_spaces, herdr_app_frontmost, herdr_app_path,
-    left_button_down, menu_bar_height, mouse_position, send_notification, show_about,
+    ChatOverlay, SettingsPanel, allow_window_above_menu_bar, float_on_all_spaces,
+    herdr_app_frontmost, herdr_app_path, left_button_down, menu_bar_height, mouse_position,
+    send_notification, show_about,
 };
 
 /// Settings-panel controls the app should apply. The panel itself is
@@ -87,6 +88,11 @@ impl SettingsPanel {
 
 #[cfg(not(target_os = "macos"))]
 pub fn float_on_all_spaces(_window: &winit::window::Window) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn allow_window_above_menu_bar(_window: &winit::window::Window) -> bool {
     false
 }
 

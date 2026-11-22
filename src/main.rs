@@ -1230,6 +1230,9 @@ impl ApplicationHandler for App {
         if !platform::float_on_all_spaces(&window) {
             eprintln!("herdr-pet: cannot make the window float on all Spaces");
         }
+        if !platform::allow_window_above_menu_bar(&window) {
+            eprintln!("herdr-pet: cannot lift the menu bar frame constraint");
+        }
         match pollster::block_on(render::Renderer::new(window.clone(), &self.pet.atlas)) {
             Ok(renderer) => self.renderer = Some(renderer),
             Err(error) => {

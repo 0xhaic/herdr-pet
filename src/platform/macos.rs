@@ -6,8 +6,10 @@
 
 use std::path::PathBuf;
 
+use objc2::runtime::{AnyObject, Imp, Sel};
+use objc2::{ffi, sel};
 use objc2_app_kit::{NSEvent, NSScreen, NSView, NSWindowCollectionBehavior, NSWorkspace};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSRect, NSString};
 use winit::platform::macos::MonitorHandleExtMacOS;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -60,6 +62,54 @@ pub fn herdr_app_path() -> Option<PathBuf> {
         .URLForApplicationWithBundleIdentifier(&NSString::from_str(HERDR_APP_BUNDLE_ID))?;
     let path = url.path()?;
     Some(PathBuf::from(path.to_string()).join("Contents/MacOS/Herdr"))
+}
+
+/// Let the window frame move above the menu bar. macOS constrains a visible
+/// window's top edge to the menu bar, which would keep the pet (drawn below
+/// the bubble) from ever reaching the status bar. Overrides
+/// `constrainFrameRect:toScreen:` on winit's window class to return the
+/// proposed frame unchanged. Returns false if the NSWindow is unavailable.
+pub fn allow_window_above_menu_bar(window: &Window) -> bool {
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return false;
+    };
+    // SAFETY: `resumed` runs on the main thread and winit keeps the NSView
+    // alive for the window's lifetime.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let Some(ns_window) = view.window() else {
+        return false;
+    };
+    unsafe {
+        let class = ffi::object_getClass(&*ns_window as *const _ as *const AnyObject);
+        let selector = sel!(constrainFrameRect:toScreen:);
+        let inherited = ffi::class_getInstanceMethod(class, selector);
+        if inherited.is_null() {
+            return false;
+        }
+        let types = ffi::method_getTypeEncoding(inherited);
+        let signature = allow_frame
+            as extern "C-unwind" fn(&AnyObject, Sel, NSRect, Option<&NSScreen>) -> NSRect;
+        // SAFETY: the signature mirrors NSWindow's inherited method, whose
+        // type encoding is reused above.
+        let imp: Imp = std::mem::transmute(signature);
+        // False when an earlier window already added the override.
+        ffi::class_addMethod(class.cast_mut(), selector, imp, types);
+    }
+    true
+}
+
+/// Return the proposed frame unchanged instead of constraining it to the
+/// screen's visible area.
+extern "C-unwind" fn allow_frame(
+    _: &AnyObject,
+    _: Sel,
+    rect: NSRect,
+    _: Option<&NSScreen>,
+) -> NSRect {
+    rect
 }
 
 /// Menu bar height in physical pixels for a monitor's screen, so the pet can
