@@ -347,15 +347,18 @@ mod settings {
     use std::path::{Path, PathBuf};
     use std::ptr::NonNull;
     use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::time::{Duration, Instant};
 
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSApplication, NSBackingStoreType, NSButton, NSButtonType, NSColor, NSControlStateValueOff,
-        NSControlStateValueOn, NSEvent, NSEventMask, NSFont, NSLineBreakMode, NSModalResponseOK,
-        NSOpenPanel, NSPopUpButton, NSSlider, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+        NSApplication, NSApplicationActivationOptions, NSBackingStoreType, NSButton, NSButtonType,
+        NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventMask,
+        NSFloatingWindowLevel, NSFont, NSLineBreakMode, NSModalResponseOK, NSOpenPanel,
+        NSPopUpButton, NSRunningApplication, NSSlider, NSTextField, NSView, NSWindow,
+        NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
@@ -377,6 +380,9 @@ mod settings {
     const TOGGLE_TOP: f64 = 204.0;
     const TOGGLE_STEP: f64 = 28.0;
     const FOOTER_TOP: f64 = 358.0;
+    /// The tray/menu click that opened the panel must finish before outside
+    /// clicks can close it again.
+    const MONITOR_ARM_DELAY: Duration = Duration::from_millis(300);
 
     /// Snapshot of the controls as they were last handed to or read from the
     /// app; polling diffs against it, so no AppKit callbacks are needed.
@@ -408,6 +414,7 @@ mod settings {
         path_chooser: Retained<PathChooser>,
         dir_events: Receiver<PanelAction>,
         monitor: Option<OutsideClickMonitor>,
+        monitor_arm_at: Option<Instant>,
         last: UiState,
     }
 
@@ -435,6 +442,14 @@ mod settings {
             // The panel is owned by `App`; closing it must only order it out.
             // SAFETY: the setter is otherwise safe to call on the main thread.
             unsafe { window.setReleasedWhenClosed(false) };
+            // Settings must be visible even when another app is frontmost or
+            // a full-screen Space is active; it closes on the next outside
+            // click anyway.
+            window.setLevel(NSFloatingWindowLevel);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
             window.center();
             let content = window.contentView()?;
 
@@ -541,6 +556,7 @@ mod settings {
                 path_chooser,
                 dir_events,
                 monitor: None,
+                monitor_arm_at: None,
                 last: UiState::default(),
             };
             panel.sync_pets(pets, selected, pets_dir, custom_dir);
@@ -553,11 +569,14 @@ mod settings {
                 return;
             };
             // Accessory apps are not activated by a menu-bar click; without
-            // this the window cannot become key and the controls stay inert.
+            // this the window can stay behind the frontmost app's windows.
             NSApplication::sharedApplication(mtm).activate();
+            NSRunningApplication::currentApplication()
+                .activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
             self.window.makeKeyAndOrderFront(None);
-            if self.monitor.is_none() {
-                self.monitor = Some(OutsideClickMonitor::install(&self.window, mtm));
+            self.window.orderFrontRegardless();
+            if self.monitor.is_none() && self.monitor_arm_at.is_none() {
+                self.monitor_arm_at = Some(Instant::now() + MONITOR_ARM_DELAY);
             }
         }
 
@@ -567,8 +586,18 @@ mod settings {
         pub fn poll(&mut self) -> Vec<PanelAction> {
             // Closing via the title bar or an outside click must also release
             // the event monitors; the next tick does that.
-            if self.monitor.is_some() && !self.window.isVisible() {
+            if !self.window.isVisible() {
                 self.monitor = None;
+                self.monitor_arm_at = None;
+            } else if self.monitor.is_none()
+                && self
+                    .monitor_arm_at
+                    .is_some_and(|arm_at| Instant::now() >= arm_at)
+            {
+                self.monitor_arm_at = None;
+                if let Some(mtm) = MainThreadMarker::new() {
+                    self.monitor = Some(OutsideClickMonitor::install(&self.window, mtm));
+                }
             }
             let mut actions = Vec::new();
             while let Ok(action) = self.dir_events.try_recv() {
