@@ -160,8 +160,11 @@ pub fn show_about() {
 }
 
 mod overlay {
+    use std::cell::{Cell, RefCell};
+    use std::path::{Path, PathBuf};
+
     use objc2::rc::Retained;
-    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
         NSBox, NSBoxType, NSColor, NSFont, NSImage, NSImageView, NSLineBreakMode, NSTextField,
         NSTitlePosition, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
@@ -171,13 +174,25 @@ mod overlay {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::Window;
 
-    use crate::chat::{BUBBLE_HEIGHT, BUBBLE_WIDTH, BUTTON_SIZE, ChatLayout};
+    use crate::chat::{ARROW_RESERVED, BUBBLE_HEIGHT, BUBBLE_WIDTH, BUTTON_SIZE, ChatLayout};
 
     const TITLE_INSET_TOP: f64 = 12.0;
     const TEXT_INSET_X: f64 = 16.0;
     const TEXT_LINE_HEIGHT: f64 = 16.0;
     const TEXT_LINE_GAP: f64 = 4.0;
     const CHEVRON_SIZE: f64 = 13.0;
+    const ARROW_SYMBOL_SIZE: f64 = 12.0;
+    const AGENT_ICON_SIZE: f64 = 14.0;
+    const AGENT_ICON_GAP: f64 = 6.0;
+
+    /// Frame inputs from the last layout pass, kept so an icon appearing can
+    /// reflow the title row without waiting for another window resize.
+    #[derive(Clone, Copy)]
+    struct Frames {
+        layout: ChatLayout,
+        height: f64,
+        pager: bool,
+    }
 
     // The glass views are display-only: returning nil from the container's hit
     // test lets clicks fall through to winit's backing view, which owns the
@@ -205,9 +220,22 @@ mod overlay {
         bubble_tint: Retained<NSBox>,
         title: Retained<NSTextField>,
         subtitle: Retained<NSTextField>,
+        agent_icon: Retained<NSImageView>,
+        prev_arrow: Retained<NSImageView>,
+        next_arrow: Retained<NSImageView>,
         button: Retained<NSVisualEffectView>,
         button_tint: Retained<NSBox>,
         chevron: Retained<NSImageView>,
+        /// Visibilities are tracked separately so the bubble, the toggle and
+        /// the pager can be hidden independently.
+        bubble_visible: Cell<bool>,
+        button_visible: Cell<bool>,
+        pager_visible: Cell<bool>,
+        icon_present: Cell<bool>,
+        frames: Cell<Option<Frames>>,
+        /// Requested icon path and tint, so a subtitle change does not reload
+        /// the same SVG from disk.
+        icon_key: RefCell<Option<(PathBuf, bool)>>,
     }
 
     impl ChatOverlay {
@@ -251,6 +279,19 @@ mod overlay {
             container.addSubview(&title);
             container.addSubview(&subtitle);
 
+            // The agent icon sits before the title text, above the glass and
+            // fully opaque like the labels.
+            let agent_icon = NSImageView::new(mtm);
+            agent_icon.setContentTintColor(Some(&NSColor::textColor()));
+            container.addSubview(&agent_icon);
+
+            // Agent pager arrows live inside the bubble's trailing end and
+            // stay fully opaque like the labels.
+            let prev_arrow = pager_arrow(mtm, "chevron.left");
+            let next_arrow = pager_arrow(mtm, "chevron.right");
+            container.addSubview(&prev_arrow);
+            container.addSubview(&next_arrow);
+
             // The toggle button shares the bubble's glass: no tint fill, the
             // same border, and the same opacity. The chevron sits above the
             // glass like the labels so it stays legible at low opacity.
@@ -273,17 +314,45 @@ mod overlay {
                 bubble_tint,
                 title,
                 subtitle,
+                agent_icon,
+                prev_arrow,
+                next_arrow,
                 button,
                 button_tint,
                 chevron,
+                bubble_visible: Cell::new(false),
+                button_visible: Cell::new(false),
+                pager_visible: Cell::new(false),
+                icon_present: Cell::new(false),
+                frames: Cell::new(None),
+                icon_key: RefCell::new(None),
             };
             overlay.set_visible(open, true);
             Some(overlay)
         }
 
         /// Reflow in AppKit's bottom-left point coordinates from the top-left
-        /// logical layout. Called on creation and whenever the window resizes.
-        pub fn layout(&self, layout: &ChatLayout, height: f64) {
+        /// logical layout. `pager` reserves room for the agent arrows inside
+        /// the bubble. Called on creation and whenever the window resizes or
+        /// the pager appears/disappears.
+        pub fn layout(&self, layout: &ChatLayout, height: f64, pager: bool) {
+            self.frames.set(Some(Frames {
+                layout: *layout,
+                height,
+                pager,
+            }));
+            self.pager_visible.set(pager);
+            self.apply_frames();
+            self.apply_visibility();
+        }
+
+        fn apply_frames(&self) {
+            let Some(frames) = self.frames.get() else {
+                return;
+            };
+            let layout = &frames.layout;
+            let height = frames.height;
+            let pager = frames.pager;
             let bubble = NSRect::new(
                 NSPoint::new(layout.bubble.x, height - layout.bubble.y - layout.bubble.h),
                 NSSize::new(layout.bubble.w, layout.bubble.h),
@@ -293,24 +362,32 @@ mod overlay {
                 NSPoint::new(0.0, 0.0),
                 NSSize::new(layout.bubble.w, layout.bubble.h),
             ));
-            let text_width = BUBBLE_WIDTH - TEXT_INSET_X * 2.0;
+            let text_right = if pager { ARROW_RESERVED } else { TEXT_INSET_X };
+            let icon_extra = if self.icon_present.get() {
+                AGENT_ICON_SIZE + AGENT_ICON_GAP
+            } else {
+                0.0
+            };
+            let text_left = TEXT_INSET_X + icon_extra;
+            let text_width = BUBBLE_WIDTH - text_left - text_right;
+            let title_y = bubble.origin.y + BUBBLE_HEIGHT - TITLE_INSET_TOP - TEXT_LINE_HEIGHT;
             self.title.setFrame(NSRect::new(
-                NSPoint::new(
-                    bubble.origin.x + TEXT_INSET_X,
-                    bubble.origin.y + BUBBLE_HEIGHT - TITLE_INSET_TOP - TEXT_LINE_HEIGHT,
-                ),
+                NSPoint::new(bubble.origin.x + text_left, title_y),
                 NSSize::new(text_width, TEXT_LINE_HEIGHT),
             ));
             self.subtitle.setFrame(NSRect::new(
                 NSPoint::new(
-                    bubble.origin.x + TEXT_INSET_X,
-                    bubble.origin.y + BUBBLE_HEIGHT
-                        - TITLE_INSET_TOP
-                        - TEXT_LINE_HEIGHT
-                        - TEXT_LINE_GAP
-                        - TEXT_LINE_HEIGHT,
+                    bubble.origin.x + text_left,
+                    title_y - TEXT_LINE_GAP - TEXT_LINE_HEIGHT,
                 ),
                 NSSize::new(text_width, TEXT_LINE_HEIGHT),
+            ));
+            self.agent_icon.setFrame(NSRect::new(
+                NSPoint::new(
+                    bubble.origin.x + TEXT_INSET_X,
+                    title_y + (TEXT_LINE_HEIGHT - AGENT_ICON_SIZE) / 2.0,
+                ),
+                NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE),
             ));
             let button = NSRect::new(
                 NSPoint::new(layout.button.x, height - layout.button.y - layout.button.h),
@@ -328,11 +405,43 @@ mod overlay {
                 ),
                 NSSize::new(CHEVRON_SIZE, CHEVRON_SIZE),
             ));
+            self.prev_arrow
+                .setFrame(appkit_rect(layout.prev_arrow, height));
+            self.next_arrow
+                .setFrame(appkit_rect(layout.next_arrow, height));
         }
 
         pub fn set_text(&self, title: &str, subtitle: &str) {
             self.title.setStringValue(&NSString::from_str(title));
             self.subtitle.setStringValue(&NSString::from_str(subtitle));
+        }
+
+        /// Load the agent icon shown before the title. `None`, or a file
+        /// AppKit cannot read, hides the icon and gives the title its full
+        /// width back.
+        pub fn set_icon(&self, icon: Option<(&Path, bool)>) {
+            let key = icon.map(|(path, tint)| (path.to_path_buf(), tint));
+            if *self.icon_key.borrow() == key {
+                return;
+            }
+            *self.icon_key.borrow_mut() = key;
+            let mut present = false;
+            if let Some((path, tint)) = icon
+                && let Some(path) = path.to_str()
+                && let Some(image) =
+                    NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(path))
+            {
+                image.setSize(NSSize::new(AGENT_ICON_SIZE, AGENT_ICON_SIZE));
+                image.setTemplate(tint);
+                self.agent_icon.setImage(Some(&image));
+                present = true;
+            }
+            if !present {
+                self.agent_icon.setImage(None);
+            }
+            self.icon_present.set(present);
+            self.apply_frames();
+            self.apply_visibility();
         }
 
         pub fn set_opacity(&self, opacity: f64) {
@@ -341,11 +450,25 @@ mod overlay {
         }
 
         /// Hide the bubble and/or the button. The chevron follows the bubble:
-        /// down when expanded, up when collapsed or auto-hidden.
+        /// down when expanded, up when collapsed or auto-hidden. The pager
+        /// arrows follow both the bubble and their own visibility.
         pub fn set_visible(&self, bubble: bool, button: bool) {
+            self.bubble_visible.set(bubble);
+            self.button_visible.set(button);
+            self.apply_visibility();
+        }
+
+        fn apply_visibility(&self) {
+            let bubble = self.bubble_visible.get();
             self.bubble.setHidden(!bubble);
             self.title.setHidden(!bubble);
             self.subtitle.setHidden(!bubble);
+            self.agent_icon
+                .setHidden(!(bubble && self.icon_present.get()));
+            let pager = bubble && self.pager_visible.get();
+            self.prev_arrow.setHidden(!pager);
+            self.next_arrow.setHidden(!pager);
+            let button = self.button_visible.get();
             self.button.setHidden(!button);
             self.chevron.setHidden(!button);
             let symbol = if bubble { "chevron.down" } else { "chevron.up" };
@@ -410,6 +533,28 @@ mod overlay {
         label.setUsesSingleLineMode(true);
         label.setMaximumNumberOfLines(1);
         label
+    }
+
+    /// Agent pager arrow: an opaque symbol above the bubble glass.
+    fn pager_arrow(mtm: MainThreadMarker, symbol: &str) -> Retained<NSImageView> {
+        let view = NSImageView::new(mtm);
+        view.setContentTintColor(Some(&NSColor::textColor()));
+        if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str(symbol),
+            None,
+        ) {
+            image.setSize(NSSize::new(ARROW_SYMBOL_SIZE, ARROW_SYMBOL_SIZE));
+            view.setImage(Some(&image));
+        }
+        view
+    }
+
+    /// Frame for a top-left-origin layout rect in AppKit's bottom-left points.
+    fn appkit_rect(rect: crate::chat::Rect, height: f64) -> NSRect {
+        NSRect::new(
+            NSPoint::new(rect.x, height - rect.y - rect.h),
+            NSSize::new(rect.w, rect.h),
+        )
     }
 }
 

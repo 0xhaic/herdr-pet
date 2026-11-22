@@ -25,7 +25,9 @@ const DEFAULT_SESSION: &str = "default";
 #[derive(Debug, Clone)]
 pub enum HerdrMessage {
     Snapshot { terminals: Vec<Terminal> },
-    Event(Event),
+    // A created terminal carries the full record; boxing keeps the enum
+    // small enough for the channel without changing `Event`.
+    Event(Box<Event>),
     Disconnected,
 }
 
@@ -161,7 +163,7 @@ async fn run_once(socket: &Path, sender: &Sender<HerdrMessage>) -> Result<()> {
                 if matches!(&event, Event::Missed) {
                     bail!("subscription fell behind");
                 }
-                send(sender, HerdrMessage::Event(event))?;
+                send(sender, HerdrMessage::Event(Box::new(event)))?;
             }
             Some("missed") => bail!("subscription fell behind"),
             // `heartbeat` and unknown notifications only keep the socket warm.
@@ -372,7 +374,7 @@ mod tests {
         let HerdrMessage::Event(event) = recv(&rx) else {
             panic!("expected an event");
         };
-        let change = table.apply_event(event).unwrap();
+        let change = table.apply_event(*event).unwrap();
         assert_eq!(change.status, status::AgentStatus::Blocked);
         assert_eq!(change.text, "t1");
 

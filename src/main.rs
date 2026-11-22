@@ -401,6 +401,19 @@ fn chat_bubble_visible(chat_enabled: bool, chat_open: bool, forced: bool) -> boo
     forced || (chat_enabled && chat_open)
 }
 
+/// Index of the manually picked agent among the bubble candidates, or 0 (the
+/// automatic focus) when the pick is absent.
+fn selected_index(candidates: &[&TerminalAgent], selected: Option<&str>) -> usize {
+    selected
+        .and_then(|address| candidates.iter().position(|agent| agent.address == address))
+        .unwrap_or(0)
+}
+
+/// Step through a non-empty list, wrapping at both ends.
+fn wrap_index(current: usize, step: isize, len: usize) -> usize {
+    (current as isize + step).rem_euclid(len as isize) as usize
+}
+
 #[derive(Debug, Clone, Copy)]
 struct WindowSnapshot {
     origin: PhysicalPosition<i32>,
@@ -447,6 +460,10 @@ struct App {
     /// agent is handled or the done tab is viewed. The button still follows
     /// `chat_enabled`.
     chat_forced: bool,
+    /// Address of the agent the user picked with the bubble's arrows. Kept
+    /// while that agent still needs the bubble; otherwise the automatic focus
+    /// order applies again.
+    chat_selected: Option<String>,
     /// Pet press origin, kept so a release without movement opens Herdr.
     click_candidate: Option<(f64, f64)>,
     started: Instant,
@@ -476,7 +493,7 @@ struct App {
     frame: Frame,
     overlay: Option<platform::ChatOverlay>,
     /// Window size, scale, and layout the native views were last fitted to.
-    overlay_key: Option<(u32, u32, u64, ChatLayout)>,
+    overlay_key: Option<(u32, u32, u64, ChatLayout, bool)>,
     last_chat_text: Option<ChatText>,
 }
 
@@ -507,6 +524,7 @@ impl App {
             next_front_check: Instant::now(),
             chat_enabled: false,
             chat_forced: false,
+            chat_selected: None,
             click_candidate: None,
             started: Instant::now(),
             next_tick: Instant::now(),
@@ -540,7 +558,7 @@ impl App {
             match message {
                 HerdrMessage::Snapshot { terminals, .. } => self.table.apply_snapshot(terminals),
                 HerdrMessage::Event(event) => {
-                    if let Some(change) = self.table.apply_event(event) {
+                    if let Some(change) = self.table.apply_event(*event) {
                         changes.push(change);
                     }
                 }
@@ -611,6 +629,16 @@ impl App {
             return;
         }
         if self.bubble_visible() && self.chat_layout.bubble.contains(x, y) {
+            if self.pager_visible() {
+                if self.chat_layout.next_arrow.contains(x, y) {
+                    self.cycle_chat_agent(1);
+                    return;
+                }
+                if self.chat_layout.prev_arrow.contains(x, y) {
+                    self.cycle_chat_agent(-1);
+                    return;
+                }
+            }
             self.focus_herdr_chat();
             return;
         }
@@ -679,11 +707,63 @@ impl App {
         self.sync_panel();
     }
 
-    /// The agent the bubble shows (and click-to-jump targets), using the same
-    /// priority and Herdr seen state as the visibility rule.
+    /// Agents that need the bubble right now, in the same focus order the
+    /// bubble's arrows cycle through.
+    fn focus_candidates(&self) -> Vec<&TerminalAgent> {
+        let seen = &self.herdr_attention.seen;
+        self.table
+            .focus_candidates_with(|address| !seen.contains(address))
+    }
+
+    /// The agent the bubble shows (and click-to-jump targets): the manual
+    /// pick while it still needs the bubble, otherwise the automatic focus.
     fn focus_agent(&self) -> Option<&TerminalAgent> {
+        let candidates = self.focus_candidates();
+        let index = selected_index(&candidates, self.chat_selected.as_deref());
+        if let Some(agent) = candidates.get(index) {
+            return Some(agent);
+        }
         let seen = &self.herdr_attention.seen;
         self.table.focus_with(|address| !seen.contains(address))
+    }
+
+    /// Whether the bubble's arrows should show: the bubble is visible and
+    /// more than one agent needs it.
+    fn pager_visible(&self) -> bool {
+        self.bubble_visible() && self.focus_candidates().len() > 1
+    }
+
+    /// Forget a manual pick once its agent stops needing the bubble, so the
+    /// bubble falls back to the automatic focus order and the same address
+    /// does not silently reappear here later.
+    fn reconcile_chat_selection(&mut self) {
+        let Some(selected) = self.chat_selected.as_deref() else {
+            return;
+        };
+        let still_needed = self
+            .focus_candidates()
+            .iter()
+            .any(|agent| agent.address == selected);
+        if !still_needed {
+            self.chat_selected = None;
+            self.last_anim_input = None;
+        }
+    }
+
+    /// Move the bubble to the previous/next agent that needs it and keep that
+    /// manual pick until the agent stops needing the bubble.
+    fn cycle_chat_agent(&mut self, step: isize) {
+        let next = {
+            let candidates = self.focus_candidates();
+            if candidates.len() < 2 {
+                return;
+            }
+            let current = selected_index(&candidates, self.chat_selected.as_deref());
+            let index = wrap_index(current, step, candidates.len());
+            candidates[index].address.clone()
+        };
+        self.chat_selected = Some(next);
+        self.sync_chat();
     }
 
     fn focus_herdr_chat(&self) {
@@ -717,6 +797,10 @@ impl App {
         }
         if let Some(overlay) = &self.overlay {
             overlay.set_text(&text.title, &text.subtitle);
+            let icon = text
+                .icon
+                .and_then(|icon| herdr_app::icon_path(icon.file).map(|path| (path, icon.tint)));
+            overlay.set_icon(icon.as_ref().map(|(path, tint)| (path.as_path(), *tint)));
         }
         self.last_chat_text = Some(text);
     }
@@ -736,12 +820,19 @@ impl App {
             return;
         }
         let scale = window.scale_factor();
-        let key = (size.width, size.height, scale.to_bits(), self.chat_layout);
+        let pager = self.pager_visible();
+        let key = (
+            size.width,
+            size.height,
+            scale.to_bits(),
+            self.chat_layout,
+            pager,
+        );
         if self.overlay_key == Some(key) {
             return;
         }
         if let Some(overlay) = &self.overlay {
-            overlay.layout(&self.chat_layout, f64::from(size.height) / scale);
+            overlay.layout(&self.chat_layout, f64::from(size.height) / scale, pager);
             overlay.set_visible(self.bubble_visible(), self.chat_enabled);
         }
         self.overlay_key = Some(key);
@@ -905,6 +996,7 @@ impl App {
         self.drain_attention();
         self.refresh_herdr_frontmost();
         self.update_chat_enabled();
+        self.reconcile_chat_selection();
         self.sync_overlay();
         let pointer = self.pointer();
         let snapshot = self.window.as_deref().and_then(WindowSnapshot::new);
@@ -1450,6 +1542,41 @@ mod tests {
         assert_eq!(clamp_chat_opacity(-0.5), 0.0);
         assert_eq!(clamp_chat_opacity(1.5), 1.0);
         assert_eq!(clamp_chat_opacity(f64::NAN), config::DEFAULT_CHAT_OPACITY);
+    }
+
+    #[test]
+    fn manual_selection_falls_back_and_wraps() {
+        use crate::status::{StatusRecord, Terminal};
+
+        let terminal = |address: &str, state: &str, status_ms: u64| Terminal {
+            address: address.to_owned(),
+            title: address.to_owned(),
+            state: "live".to_owned(),
+            status: Some(StatusRecord {
+                state: state.to_owned(),
+                ..Default::default()
+            }),
+            status_ms: Some(status_ms),
+            ..Default::default()
+        };
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            terminal("t1", "blocked", 100),
+            terminal("t2", "error", 200),
+            terminal("t3", "working", 300),
+        ]);
+        let candidates = table.focus_candidates_with(|_| true);
+        assert_eq!(selected_index(&candidates, None), 0);
+        assert_eq!(selected_index(&candidates, Some("t2")), 1);
+        assert_eq!(
+            selected_index(&candidates, Some("gone")),
+            0,
+            "a pick that stopped needing the bubble falls back to the first"
+        );
+
+        assert_eq!(wrap_index(0, 1, 3), 1);
+        assert_eq!(wrap_index(2, 1, 3), 0);
+        assert_eq!(wrap_index(0, -1, 3), 2);
     }
 
     #[test]

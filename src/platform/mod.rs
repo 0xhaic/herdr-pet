@@ -44,9 +44,11 @@ impl ChatOverlay {
         None
     }
 
-    pub fn layout(&self, _layout: &crate::chat::ChatLayout, _height: f64) {}
+    pub fn layout(&self, _layout: &crate::chat::ChatLayout, _height: f64, _pager: bool) {}
 
     pub fn set_text(&self, _title: &str, _subtitle: &str) {}
+
+    pub fn set_icon(&self, _icon: Option<(&std::path::Path, bool)>) {}
 
     pub fn set_visible(&self, _bubble: bool, _button: bool) {}
 

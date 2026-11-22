@@ -19,6 +19,15 @@ pub const BUTTON_SIZE: f64 = 28.0;
 pub const BUTTON_GAP: f64 = 6.0;
 /// Transparent margin around the UI so rounded edges are not clipped.
 pub const WINDOW_PAD: f64 = 8.0;
+/// Previous/next agent arrows inside the bubble's trailing end, shown while
+/// several agents need the bubble.
+pub const ARROW_SIZE: f64 = 22.0;
+/// Gap between the two bubble arrows.
+pub const ARROW_GAP: f64 = 4.0;
+/// Inset from the bubble's right edge to the next arrow.
+pub const ARROW_INSET: f64 = 8.0;
+/// Width the bubble text keeps clear for both arrows.
+pub const ARROW_RESERVED: f64 = ARROW_INSET + ARROW_SIZE * 2.0 + ARROW_GAP;
 
 /// Longest text handed to a single label line; the label truncates the rest.
 const MAX_TEXT_CHARS: usize = 120;
@@ -51,6 +60,9 @@ pub struct ChatLayout {
     pub pet: Rect,
     /// Toggle button rectangle, top-left origin.
     pub button: Rect,
+    /// Previous/next agent arrows inside the bubble, top-left origin.
+    pub prev_arrow: Rect,
+    pub next_arrow: Rect,
 }
 
 impl ChatLayout {
@@ -72,6 +84,8 @@ impl ChatLayout {
         let bubble_y = WINDOW_PAD;
         let pet_y = bubble_y + BUBBLE_HEIGHT + BUBBLE_GAP;
         let button_y = pet_y + pet_height + BUTTON_GAP;
+        let next_arrow_x = (width + BUBBLE_WIDTH) / 2.0 - ARROW_INSET - ARROW_SIZE;
+        let arrow_y = bubble_y + (BUBBLE_HEIGHT - ARROW_SIZE) / 2.0;
         Self {
             window: (width, height),
             bubble: Rect {
@@ -93,6 +107,18 @@ impl ChatLayout {
                 w: BUTTON_SIZE,
                 h: BUTTON_SIZE,
             },
+            prev_arrow: Rect {
+                x: next_arrow_x - ARROW_GAP - ARROW_SIZE,
+                y: arrow_y,
+                w: ARROW_SIZE,
+                h: ARROW_SIZE,
+            },
+            next_arrow: Rect {
+                x: next_arrow_x,
+                y: arrow_y,
+                w: ARROW_SIZE,
+                h: ARROW_SIZE,
+            },
         }
     }
 
@@ -102,10 +128,81 @@ impl ChatLayout {
     }
 }
 
+/// An agent icon from Herdr.app's program table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentIcon {
+    /// Icon file inside Herdr.app's home, e.g. `icons/claude.svg`.
+    pub file: &'static str,
+    /// Herdr draws tinted icons as one-color glyphs in the text color.
+    pub tint: bool,
+}
+
+const GENERIC_AGENT_ICON: AgentIcon = AgentIcon {
+    file: "icons/agent.svg",
+    tint: true,
+};
+
+/// Herdr.app's aliases for agent programs, limited to each entry's icon and
+/// tint flag: (reported app / program name, icon, tinted).
+const AGENT_ICONS: &[(&str, &str, bool)] = &[
+    ("claude-code", "icons/claude.svg", false),
+    ("claude", "icons/claude.svg", false),
+    ("codex", "icons/codex.svg", false),
+    ("pi", "icons/pi.svg", true),
+    ("pig", "icons/pig.svg", false),
+    ("opencode", "icons/opencode.svg", true),
+    ("cursor-agent", "icons/cursor.svg", true),
+    ("cursor", "icons/cursor.svg", true),
+    ("github-copilot", "icons/copilot.svg", true),
+    ("copilot", "icons/copilot.svg", true),
+    ("amp", "icons/amp.svg", false),
+    ("grok-build", "icons/grok.svg", true),
+    ("grok", "icons/grok.svg", true),
+    ("dsh-tui", "icons/dsh-tui.svg", true),
+    ("goose", "icons/goose.svg", true),
+    ("agy", "icons/antigravity.svg", false),
+    ("antigravity", "icons/antigravity.svg", false),
+    ("kimi-code", "icons/kimi.svg", false),
+    ("kimicodecli", "icons/kimi.svg", false),
+    ("kimi", "icons/kimi.svg", false),
+    ("kiro-cli", "icons/kiro.svg", false),
+    ("kiro", "icons/kiro.svg", false),
+    ("hermes", "icons/hermes.svg", true),
+    ("mastracode", "icons/mastracode.svg", true),
+    ("qodercli", "icons/qoder.svg", true),
+    ("qoder", "icons/qoder.svg", true),
+    ("muse", "icons/muse.svg", true),
+    ("crush", "icons/crush.svg", false),
+    ("command-code", "icons/command-code.svg", true),
+    ("prime-agent", "icons/prime-agent.svg", true),
+    ("gemini", "icons/gemini.svg", true),
+    ("ollama", "icons/ollama.svg", true),
+    ("oh-my-pi", "icons/omp.svg", true),
+    ("omp", "icons/omp.svg", true),
+];
+
+fn lookup_agent_icon(key: &str) -> Option<AgentIcon> {
+    let key = key.trim();
+    AGENT_ICONS
+        .iter()
+        .find(|(alias, _, _)| key.eq_ignore_ascii_case(alias))
+        .map(|&(_, file, tint)| AgentIcon { file, tint })
+}
+
+/// The agent's icon from Herdr.app's program table: its own reported identity
+/// first, then the program name, else Herdr's generic agent glyph.
+pub fn agent_icon(app: Option<&str>, name: Option<&str>) -> AgentIcon {
+    app.and_then(lookup_agent_icon)
+        .or_else(|| name.and_then(lookup_agent_icon))
+        .unwrap_or(GENERIC_AGENT_ICON)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatText {
     pub title: String,
     pub subtitle: String,
+    /// Agent icon before the title; None for the no-agent placeholder.
+    pub icon: Option<AgentIcon>,
 }
 
 /// Two lines for the bubble: the focused agent's task title and its latest
@@ -121,11 +218,16 @@ pub fn chat_text(agent: Option<&TerminalAgent>) -> ChatText {
                 .unwrap_or_else(|| {
                     status_label(agent.status.unwrap_or(AgentStatus::Idle)).to_owned()
                 });
-            ChatText { title, subtitle }
+            ChatText {
+                title,
+                subtitle,
+                icon: Some(agent_icon(agent.app.as_deref(), agent.name.as_deref())),
+            }
         }
         None => ChatText {
             title: "暂无任务".to_owned(),
             subtitle: "等待 agent 状态".to_owned(),
+            icon: None,
         },
     }
 }
@@ -210,6 +312,40 @@ mod tests {
     }
 
     #[test]
+    fn layout_places_pager_arrows_inside_the_bubble() {
+        let layout = ChatLayout::new(104.0);
+        assert_eq!(
+            layout.next_arrow,
+            Rect {
+                x: 298.0,
+                y: 29.0,
+                w: 22.0,
+                h: 22.0
+            }
+        );
+        assert_eq!(
+            layout.prev_arrow,
+            Rect {
+                x: 272.0,
+                y: 29.0,
+                w: 22.0,
+                h: 22.0
+            }
+        );
+        for arrow in [layout.prev_arrow, layout.next_arrow] {
+            assert!(arrow.x >= layout.bubble.x);
+            assert!(arrow.x + arrow.w <= layout.bubble.x + layout.bubble.w);
+            assert!(arrow.y >= layout.bubble.y);
+            assert!(arrow.y + arrow.h <= layout.bubble.y + layout.bubble.h);
+        }
+        assert_eq!(
+            layout.bubble.x + BUBBLE_WIDTH - ARROW_RESERVED,
+            layout.prev_arrow.x,
+            "text must end before the pager"
+        );
+    }
+
+    #[test]
     fn layout_grows_vertically_with_pet_size() {
         let small = ChatLayout::new(52.0);
         let large = ChatLayout::new(312.0);
@@ -248,7 +384,8 @@ mod tests {
             chat_text(table.focus_with(|_| false)),
             ChatText {
                 title: "t2 title".to_owned(),
-                subtitle: "Permission needed".to_owned()
+                subtitle: "Permission needed".to_owned(),
+                icon: Some(GENERIC_AGENT_ICON)
             }
         );
     }
@@ -263,9 +400,43 @@ mod tests {
             chat_text(None),
             ChatText {
                 title: "暂无任务".to_owned(),
-                subtitle: "等待 agent 状态".to_owned()
+                subtitle: "等待 agent 状态".to_owned(),
+                icon: None
             }
         );
+    }
+
+    #[test]
+    fn agent_icons_follow_app_then_program_name() {
+        assert_eq!(
+            agent_icon(Some("claude-code"), None),
+            AgentIcon {
+                file: "icons/claude.svg",
+                tint: false
+            }
+        );
+        assert_eq!(
+            agent_icon(Some("pi"), None),
+            AgentIcon {
+                file: "icons/pi.svg",
+                tint: true
+            }
+        );
+        assert_eq!(
+            agent_icon(Some("unknown"), Some("codex")),
+            AgentIcon {
+                file: "icons/codex.svg",
+                tint: false
+            }
+        );
+        assert_eq!(
+            agent_icon(None, Some("cursor-agent")),
+            AgentIcon {
+                file: "icons/cursor.svg",
+                tint: true
+            }
+        );
+        assert_eq!(agent_icon(Some("unknown"), None), GENERIC_AGENT_ICON);
     }
 
     #[test]

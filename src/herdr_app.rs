@@ -113,6 +113,12 @@ fn app_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".config").join("herdr-app"))
 }
 
+/// A program icon in Herdr.app's home, e.g. `icons/claude.svg`. The file is
+/// loaded on demand; a missing Herdr.app simply has no icon.
+pub fn icon_path(file: &str) -> Option<PathBuf> {
+    Some(app_home()?.join(file))
+}
+
 /// Raise Herdr.app and show `address`, retrying while a freshly launched app
 /// finishes opening its window. Runs off the UI thread and never fails loudly.
 pub fn focus_terminal(address: String) {

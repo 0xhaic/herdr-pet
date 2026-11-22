@@ -45,6 +45,9 @@ pub struct StatusRecord {
     pub state: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// The program's own identity (OSC 7501 `app`), e.g. `claude-code`.
+    #[serde(default)]
+    pub app: String,
     /// The program's own words for what it is doing, shown in the chat bubble.
     #[serde(default)]
     pub msg: String,
@@ -76,6 +79,8 @@ pub struct TerminalAgent {
     pub labels: BTreeMap<String, String>,
     pub live: bool,
     pub status: Option<AgentStatus>,
+    /// The program's reported identity (`status.app`), used for its bubble icon.
+    pub app: Option<String>,
     pub status_msg: Option<String>,
     pub status_ms: Option<u64>,
     /// Monotonic table order of the latest status write; breaks focus ties.
@@ -106,6 +111,7 @@ impl TerminalAgent {
         } else {
             Some(title)
         };
+        let app = if live { status_app(&status) } else { None };
         let status_msg = status
             .as_ref()
             .map(|record| record.msg.trim())
@@ -118,6 +124,7 @@ impl TerminalAgent {
             labels,
             live,
             status: agent_status,
+            app,
             status_msg,
             status_ms,
             updated_at,
@@ -158,11 +165,31 @@ fn order_key(agent: &TerminalAgent) -> (u64, u64) {
     (agent.status_ms.unwrap_or(0), agent.updated_at)
 }
 
+/// Whether `agent` currently needs the chat bubble: blocked, working and
+/// error always do; done only while Herdr has not marked it seen. Idle and
+/// plain shells never do.
+fn agent_needs_chat(agent: &TerminalAgent, unseen_done: &impl Fn(&str) -> bool) -> bool {
+    agent.live
+        && match agent.status {
+            Some(AgentStatus::Blocked | AgentStatus::Working | AgentStatus::Error) => true,
+            Some(AgentStatus::Done) => unseen_done(&agent.address),
+            Some(AgentStatus::Idle) | None => false,
+        }
+}
+
 fn status_title(status: &Option<StatusRecord>) -> Option<String> {
     status
         .as_ref()
         .and_then(|record| record.title.clone())
         .filter(|title| !title.is_empty())
+}
+
+fn status_app(status: &Option<StatusRecord>) -> Option<String> {
+    status
+        .as_ref()
+        .map(|record| record.app.trim())
+        .filter(|app| !app.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +367,7 @@ impl StatusTable {
             Event::StatusCleared { terminal } => {
                 if let Some(agent) = self.terminals.get_mut(&terminal) {
                     agent.status = None;
+                    agent.app = None;
                     agent.status_msg = None;
                     agent.status_ms = None;
                 }
@@ -349,6 +377,7 @@ impl StatusTable {
                 if let Some(agent) = self.terminals.get_mut(&terminal) {
                     agent.live = false;
                     agent.status = None;
+                    agent.app = None;
                     agent.status_msg = None;
                     agent.status_ms = None;
                 }
@@ -383,6 +412,9 @@ impl StatusTable {
         }
         let old = agent.status;
         agent.status = Some(new);
+        agent.app = Some(record.app.trim())
+            .filter(|app| !app.is_empty())
+            .map(str::to_owned);
         agent.status_msg = Some(record.msg.trim())
             .filter(|msg| !msg.is_empty())
             .map(str::to_owned);
@@ -398,7 +430,7 @@ impl StatusTable {
         })
     }
 
-    /// The agent the chat bubble shows:
+    /// Live agents with a status, in chat focus order:
     /// 1. blocked / error (earliest status change first);
     /// 2. done that Herdr has not marked seen (earliest completion first);
     /// 3. the working agent whose status changed last;
@@ -406,50 +438,54 @@ impl StatusTable {
     ///
     /// The working agent's last status change is the best available proxy for
     /// "last interacted"; Herdr exposes no per-tab interaction timestamp.
-    pub fn focus_with(&self, unseen_done: impl Fn(&str) -> bool) -> Option<&TerminalAgent> {
+    fn ordered_with(&self, unseen_done: &impl Fn(&str) -> bool) -> Vec<&TerminalAgent> {
         let last_working = self
             .terminals
             .values()
             .filter(|agent| agent.live && agent.status == Some(AgentStatus::Working))
             .max_by_key(|agent| order_key(agent))
             .map(|agent| agent.address.as_str());
-        let mut best: Option<(&TerminalAgent, u8, (u64, u64))> = None;
-        for agent in self.terminals.values() {
-            if !agent.live || agent.status.is_none() {
-                continue;
-            }
-            let rank = match agent.status {
-                Some(AgentStatus::Blocked | AgentStatus::Error) => 0,
-                Some(AgentStatus::Done) if unseen_done(&agent.address) => 1,
-                Some(AgentStatus::Working) if last_working == Some(agent.address.as_str()) => 2,
-                _ => 3,
-            };
-            let key = order_key(agent);
-            let better = match best {
-                None => true,
-                Some((_, best_rank, best_key)) => {
-                    rank < best_rank || (rank == best_rank && key < best_key)
-                }
-            };
-            if better {
-                best = Some((agent, rank, key));
-            }
-        }
-        best.map(|(agent, _, _)| agent)
+        let mut ordered: Vec<(&TerminalAgent, u8, (u64, u64))> = self
+            .terminals
+            .values()
+            .filter(|agent| agent.live && agent.status.is_some())
+            .map(|agent| {
+                let rank = match agent.status {
+                    Some(AgentStatus::Blocked | AgentStatus::Error) => 0,
+                    Some(AgentStatus::Done) if unseen_done(&agent.address) => 1,
+                    Some(AgentStatus::Working) if last_working == Some(agent.address.as_str()) => 2,
+                    _ => 3,
+                };
+                (agent, rank, order_key(agent))
+            })
+            .collect();
+        ordered.sort_by_key(|(_, rank, key)| (*rank, *key));
+        ordered.into_iter().map(|(agent, _, _)| agent).collect()
+    }
+
+    /// The agent the chat bubble shows by default: the first entry of the
+    /// focus order.
+    pub fn focus_with(&self, unseen_done: impl Fn(&str) -> bool) -> Option<&TerminalAgent> {
+        self.ordered_with(&unseen_done).into_iter().next()
+    }
+
+    /// Agents that need the chat bubble right now, in focus order. The first
+    /// entry is the automatic focus; the bubble's arrows cycle through the
+    /// rest. Idle agents, seen done and plain shells never appear here.
+    pub fn focus_candidates_with(&self, unseen_done: impl Fn(&str) -> bool) -> Vec<&TerminalAgent> {
+        self.ordered_with(&unseen_done)
+            .into_iter()
+            .filter(|agent| agent_needs_chat(agent, &unseen_done))
+            .collect()
     }
 
     /// Whether any live agent needs the chat UI. Blocked, working and error
     /// always do; done only counts while `unseen_done` says it has not been
     /// viewed in Herdr. Idle and plain shells never count.
     pub fn is_active_with(&self, unseen_done: impl Fn(&str) -> bool) -> bool {
-        self.terminals.values().any(|agent| {
-            agent.live
-                && match agent.status {
-                    Some(AgentStatus::Blocked | AgentStatus::Working | AgentStatus::Error) => true,
-                    Some(AgentStatus::Done) => unseen_done(&agent.address),
-                    Some(AgentStatus::Idle) | None => false,
-                }
-        })
+        self.terminals
+            .values()
+            .any(|agent| agent_needs_chat(agent, &unseen_done))
     }
 
     /// Whether any live agent is blocked or errored. These states wait for the
@@ -511,8 +547,7 @@ mod tests {
             state: state.to_owned(),
             status: status.map(|state| StatusRecord {
                 state: state.to_owned(),
-                title: None,
-                msg: String::new(),
+                ..StatusRecord::default()
             }),
             ..Terminal::default()
         }
@@ -523,8 +558,7 @@ mod tests {
             terminal: address.to_owned(),
             status: StatusRecord {
                 state: state.to_owned(),
-                title: None,
-                msg: String::new(),
+                ..StatusRecord::default()
             },
         }
     }
@@ -991,7 +1025,7 @@ mod tests {
         agent.status = Some(StatusRecord {
             state: "working".to_owned(),
             title: Some("from status".to_owned()),
-            msg: String::new(),
+            ..StatusRecord::default()
         });
         table.apply_snapshot(vec![agent]);
         assert_eq!(
@@ -1142,6 +1176,49 @@ mod tests {
     }
 
     #[test]
+    fn focus_candidates_include_only_agents_that_need_the_bubble() {
+        let with_ms = |address: &str, state: &str, status_ms: u64| {
+            let mut terminal = terminal(address, "live", Some(state));
+            terminal.status_ms = Some(status_ms);
+            terminal
+        };
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![
+            with_ms("t1", "blocked", 100),
+            with_ms("t2", "error", 200),
+            with_ms("t3", "done", 50),
+            with_ms("t4", "working", 300),
+            with_ms("t5", "working", 400),
+            with_ms("t6", "done", 10),
+            with_ms("t7", "idle", 5),
+            terminal("t8", "live", None),
+        ]);
+
+        let addresses = |unseen: &[&str]| {
+            table
+                .focus_candidates_with(|address| unseen.contains(&address))
+                .into_iter()
+                .map(|agent| agent.address.clone())
+                .collect::<Vec<_>>()
+        };
+        // Blocked, error, unseen done, the last working agent, then the
+        // older working agent. Seen done, idle and plain shells are excluded.
+        assert_eq!(addresses(&["t3"]), vec!["t1", "t2", "t3", "t5", "t4"]);
+        assert_eq!(addresses(&[]), vec!["t1", "t2", "t5", "t4"]);
+
+        // The automatic focus is the first candidate while one exists.
+        assert_eq!(
+            table
+                .focus_candidates_with(|_| true)
+                .first()
+                .map(|agent| agent.address.clone()),
+            table
+                .focus_with(|_| true)
+                .map(|agent| agent.address.clone())
+        );
+    }
+
+    #[test]
     fn focus_ignores_plain_shells() {
         let table_focus = {
             let mut table = StatusTable::new();
@@ -1185,6 +1262,33 @@ mod tests {
         table.apply_event(parse_event(&clear));
         assert_eq!(table.focus_with(|_| true), None);
         assert_eq!(table.aggregate().status, None);
+    }
+
+    #[test]
+    fn agent_app_follows_status_records() {
+        let mut input = terminal("t1", "live", Some("working"));
+        input.status.as_mut().unwrap().app = "claude-code".to_owned();
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![input]);
+
+        let app = |table: &StatusTable| {
+            table
+                .focus_with(|_| true)
+                .and_then(|agent| agent.app.clone())
+        };
+        assert_eq!(app(&table), Some("claude-code".to_owned()));
+
+        let update = json!({
+            "type": "status",
+            "terminal": "t1",
+            "data": {"status": {"state": "working", "app": "pi"}}
+        });
+        table.apply_event(parse_event(&update));
+        assert_eq!(app(&table), Some("pi".to_owned()));
+
+        // A record without an app clears the identity instead of keeping it.
+        table.apply_event(status_event("t1", "working"));
+        assert_eq!(app(&table), None);
     }
 
     #[test]

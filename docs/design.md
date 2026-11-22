@@ -188,7 +188,7 @@ Idle / Done 凝视窗口 + 凝视 -> look row 9/10（仅当 atlas 有 11 行）
 按 `Terminal.address` 维护：
 
 ```text
-TerminalAgent { address, title, name, labels, live, status: Option<AgentStatus>, status_ms }
+TerminalAgent { address, title, name, labels, live, status: Option<AgentStatus>, app, status_msg, status_ms }
 AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先级
 ```
 
@@ -198,12 +198,15 @@ AgentStatus   { Idle, Done, Working, Error, Blocked }   // Ord 即显示优先�
   保证"崩溃"能被看到。Working 提到 Done 之前，避免长期存在的 done 终端压住
   仍在执行的任务——站立只表示有任务在执行。）
 - 输出 `Aggregate { status: Option<AgentStatus>, blocked, error, done, working, total }`。
-- 聊天框的聚焦 agent（`focus_with`）：只在 `live` 且 `status.is_some()` 的终端中
-  选，分组为 1) blocked/error、2) 未读 done、3) 最近一次状态变化的 working、
-  4) 其它；同一组取最早状态时间（working 组例外，取最近）。`status_ms` 来自快照；
-  状态事件使用接收时的墙上时钟，用于同一组的时间顺序。`Status` 记录的 `msg`
-  随 `TerminalAgent` 保存为 `status_msg`；status 更新时同步，status 清除、
-  finished/lost 时清空，避免第二行残留旧动作。
+- 聊天框的聚焦顺序（`ordered_with`）：只在 `live` 且 `status.is_some()` 的终端中
+  排，分组为 1) blocked/error、2) 未读 done、3) 最近一次状态变化的 working、
+  4) 其它；同一组取最早状态时间（working 组例外，取最近）。`focus_with` 取首个；
+  气泡内左右箭头使用 `focus_candidates_with`，即该顺序中当前需要气泡的子集
+  （blocked/working/error、未读 done），首个即自动聚焦，其余供手动切换。
+  `status_ms` 来自快照；状态事件使用接收时的墙上时钟，用于同一组的时间顺序。
+  `Status` 记录的 `msg` 随 `TerminalAgent` 保存为 `status_msg`，`app` 保存为
+  `app`（气泡标题图标用）；status 更新时同步，status 清除、finished/lost 时清空，
+  避免第二行或图标残留旧状态。
 - 气泡聚焦与宠物动画分开：动画仍用 `Aggregate.status` 的
   `Blocked > Error > Working > Done > Idle` 聚合；气泡用上面的分组，两者可能指向
   不同 agent（例如 bubble 选更早的 error，动画按 aggregate 选 blocked）。
@@ -298,6 +301,7 @@ Socket 发现顺序：
   可点击，其余区域穿透。`window.set_cursor_hittest` 在 winit 0.30 上映射到
   `setIgnoresMouseEvents:`。
 - 点击归属：箭头按钮只切换聊天框（不拖拽）；点击气泡拉起 Herdr 并跳到当前会话；
+  气泡内的左右箭头只切换显示的会话（不拉起 Herdr），其余气泡区域照常跳转；
   宠物格内按下先进入拖拽候选，释放时位移 ≤ 3 logical px 才视为点击并跳转，超过则
   只拖动窗口。聊天框隐藏时按钮/气泡矩形不再可点击或穿透拦截，但宠物点击仍可跳转。
   拖动、悬停与凝视都以宠物格中心为基准，不受更高窗口影响。
@@ -437,6 +441,8 @@ Socket 发现顺序：
 | 气泡 | 320 × 64，圆角 32，位于顶部，左右居中 |
 | 宠物格 | 192/208 比例的 cell，水平居中，顶部距气泡底 16 |
 | 箭头按钮 | 28 × 28 圆形，宠物格下方 6，右边缘与宠物格右边缘对齐 |
+| 气泡内箭头 | 22 × 22 命中区 × 2，贴气泡右端内缩 8，间距 4，垂直居中；有多个候选会话时显示 |
+| 标题行图标 | 14 × 14，左内缩 16，与标题行垂直居中；显示时标题与副标题右移 20（14 + 6 间距）并相应缩窄 |
 
 - 窗口高度 = `8 + 64 + 16 + 宠物高 + 6 + 28 + 8`；收起只 `setHidden(true)` 气泡，
   不改变窗口尺寸或位置，宠物不会跳动。
@@ -455,6 +461,20 @@ Socket 发现顺序：
   address）；第二行 = `status.msg`（程序自己的动作文案），为空时回退
   `空闲 / 工作中 / 等待输入 / 已完成 / 出错了`。没有带状态的 agent 时显示
   `暂无任务 / 等待 agent 状态`。文本折叠空白并截断到 120 字符，避免异常长度。
+- Agent 图标：标题行左侧 14 × 14。读取 Herdr.app program 图标目录
+  （`HERDR_APP_HOME` → `$XDG_CONFIG_HOME/herdr-app` → `~/.config/herdr-app` 下的
+  `icons/*.svg`），按 `status.app`（OSC 7501 自报身份）优先、终端 `name` 兜底映射：
+  `claude-code` → `claude.svg`、`pi` → `pi.svg`、`codex` → `codex.svg` 等；未知
+  agent 用 `icons/agent.svg`。Herdr 标记为 tint 的单色图标用模板渲染并跟随
+  `textColor`，其余保留原色；图标与文字同在玻璃层之上，不随 `chat_opacity` 变淡。
+  文件缺失或 AppKit 无法读取时隐藏图标，两行文字恢复原左内缩与宽度。图标参与
+  气泡文案比较，切换会话时随标题一起刷新。
+- 会话切换：需要气泡的候选（blocked/working/error、未读 done）多于一个且气泡可见时，
+  右端显示 `chevron.left/right`，按 3.2 的顺序循环切换；文字区在显示时让出
+  `ARROW_RESERVED = 8 + 22 × 2 + 4`。手动选中的地址保持到该会话不再需要气泡为止，
+  期间状态变化只刷新它的两行文案；一旦离开候选（处理完、被 Herdr 查看、状态清除），
+  清除选择并回到自动聚焦顺序，避免同一地址之后再次出现时被静默选中。箭头与文字
+  一样位于玻璃层之上，不随 `chat_opacity` 变淡。
 - 状态：`config.chat_open` 默认 true；点击箭头切换并写回，不新增托盘菜单项。
 - 可用性：`chat_ui = active && !herdr_frontmost`。`active` 指任一 live agent 处于
   `blocked` / `working` / `error`，或处于 `done` 且 Herdr 尚未标记已读；
@@ -477,8 +497,9 @@ Socket 发现顺序：
   `herdr-app status` 子进程，也不区分 Herdr 当前展示哪个 tab。
 - 渲染：宠物 quad 只占布局中的宠物格；子矩形由 App 每帧换算成裁剪空间坐标传给
   shader，窗口其余区域保持透明。悬停、凝视中心与逐像素穿透都改用宠物格坐标。
-- 测试锚点：布局尺寸/居中/随高度增长、矩形半开区间、气泡聚焦优先级与同组时间
-  顺序、`msg` 跟随 status 更新/清除、单行折叠与截断、blocked/error 与未读 done
+- 测试锚点：布局尺寸/居中/随高度增长、矩形半开区间、气泡箭头位于气泡内、
+  气泡候选过滤与聚焦顺序、手动选择缺失时回落首个与左右循环、`msg` / `app` 跟随
+  status 更新/清除、agent 图标映射、单行折叠与截断、blocked/error 与未读 done
   强制显示及前台/收起组合。
 
 ### 3.11 `herdr_app.rs` — 已读状态与点击跳转
@@ -523,12 +544,14 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
   一次性行动画接续、长待机随机动作、凝视角度与死区、11 行以下禁用凝视。
 - `status`：聚合优先级、初始快照不提醒、进入 blocked/done 提醒、
   finished/lost 排除、真实事件 JSON 解析、气泡聚焦优先级与同组时间顺序、
-  `msg` 更新/清除、blocked/working/error 与未读 done 视为活跃。
-- `chat`：三段布局尺寸与居中、随宠物高度增长、矩形命中、两行文案回退、
-  单行折叠与截断。
+  候选过滤与首个候选等于自动聚焦、`msg` / `app` 更新与清除、
+  blocked/working/error 与未读 done 视为活跃。
+- `chat`：三段布局尺寸与居中、随宠物高度增长、矩形命中、气泡内箭头位于气泡内且
+  文字让出箭头宽度、两行文案回退、单行折叠与截断、agent 图标按 `app` → `name`
+  → 通用图标的映射。
 - `herdr_app`：`view.json` attention 的 seen 地址解析。
-- `main`：点击 vs 拖动阈值、聊天 UI 可见性（活跃 + Herdr 非前台）、`chat_opacity`
-  越界/非法值回落。
+- `main`：点击 vs 拖动阈值、聊天 UI 可见性（活跃 + Herdr 非前台）、手动选择缺失时
+  回落首个候选与左右循环、`chat_opacity` 越界/非法值回落。
 - `herdr`：临时 Unix socket 假服务端，验证 hello → subscribe → 事件 → 重连。
 - `config`：默认值、round-trip、损坏文件回落。
 - `notify`：AppleScript 转义。
@@ -554,6 +577,12 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
    后 500 ms 内消失（已用假 herdr + 假 view.json 验证）。
 10. 多 agent 时确认气泡标题按 blocked/error → 未读 done → 最近状态变化的 working
     → 其它切换；同组按状态时间先后。单测覆盖，多 agent 实机待回归。
+11. 多个候选会话时气泡右端出现左右箭头；点击可循环切换且不会拉起 Herdr，文案随
+    切换立即更新；手动选择在其它会话状态变化时保持不变，被选会话处理完后回到自动
+    顺序；候选减为 1 个时箭头消失、文字恢复整行宽度。
+12. 用 `claude-code` / `pi` / `codex` 会话确认标题行图标与 Herdr 标签页一致；
+    未知 agent 显示通用图标；Herdr.app 不存在或图标文件缺失时图标隐藏，文字左移
+    并恢复原宽度。
 
 测试素材：测试内用 `image` 生成 1536×1872 的合成 atlas；不提交任何用户宠物素材。
 

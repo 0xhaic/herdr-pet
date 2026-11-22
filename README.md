@@ -10,14 +10,21 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **状态汇总**：汇总本机所有 herdr agent，一只宠物显示最紧急的状态，优先级
   `Blocked > Error > Working > Done > Idle`（Working 高于 Done，站立只表示有任务在执行）。
 - **聊天框**：宠物上方固定两行的毛玻璃气泡，显示最紧急 agent 的任务标题与最新动作
-  （`status.msg`，缺省回退中文状态）。宠物右下角的箭头按钮收起/展开，开关写入配置；
-  气泡与箭头按钮共用同一套玻璃样式和 `chat_opacity` 不透明度，默认 `0.7`；文字与箭头
-  颜色随系统浅色/深色外观切换，避免亮色背景上的白字不可读。
+  （`status.msg`，缺省回退中文状态）。标题行文字前显示 agent 图标，取自 Herdr.app
+  的 program 图标目录（`HERDR_APP_HOME/icons`）：已知 agent 使用对应品牌/单色图标，
+  未知 agent 使用通用 agent 图标；Herdr.app 或图标文件不存在时自动不显示并恢复文字
+  宽度。宠物右下角的箭头按钮收起/展开，开关写入配置；气泡与箭头按钮共用同一套玻璃
+  样式和 `chat_opacity` 不透明度，默认 `0.7`；文字与箭头颜色随系统浅色/深色外观
+  切换，避免亮色背景上的白字不可读。
 - **气泡内容优先级**：`blocked`/`error` → 未读 `done` → 最近状态变化的 `working`
   → 其它。同一档取时间最早（blocked/error、未读 done）；`working` 取最近一次状态
   变化作为「最后一次交互」的近似（herdr 没有逐标签页交互时间）。宠物动画仍按
   `Blocked > Error > Working > Done > Idle` 的聚合优先级，因此气泡和动画可能指向
   不同 agent。
+- **会话切换**：有多个会话需要气泡（`blocked` / `working` / `error` / 未读 `done`）
+  时，气泡右端显示左右箭头，点击按上述优先级在候选会话间循环切换。手动选择后气泡
+  保持该会话，状态变化照常刷新它的两行文案；当它不再需要气泡（被处理、被 Herdr
+  查看或状态清除）时，自动回落到剩余候选中的最高优先级会话。
 - **显示时机**：通常只有 Herdr 不在前台（或未启动）、且存在需要关注的 agent 时才显示
   聊天 UI：`blocked` / `working` / `error` 始终算；`done` 在 Herdr 尚未标记已读时
   也算，查看后自动消失；只有已读 `done` / `idle` 时整体隐藏。例外：任一 agent 处于
@@ -50,8 +57,9 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`），
   目录内包含 `pet.json` 与 `spritesheet.webp`；可在设置面板中改用其它宠物目录。
 - Herdr.app（可选）：前台判断使用 `NSWorkspace`，点击跳转通过
-  `herdr-app do agent.focus` 实现；未安装或找不到时宠物其余功能正常，点击只会
-  尝试打开 Herdr。
+  `herdr-app do agent.focus` 实现；气泡标题行的 agent 图标也读取 Herdr.app 的
+  program 图标目录。未安装或找不到时宠物其余功能正常，图标隐藏，点击只会尝试
+  打开 Herdr。
 
 ## 构建与运行
 
