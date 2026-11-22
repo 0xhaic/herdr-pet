@@ -180,17 +180,21 @@ mod overlay {
             container.addSubview(&title);
             container.addSubview(&subtitle);
 
+            // The toggle button shares the bubble's glass: no tint fill, the
+            // same border, and the same opacity. The chevron sits above the
+            // glass like the labels so it stays legible at low opacity.
             let (button, button_tint) = glass_view(
                 mtm,
                 BUTTON_SIZE / 2.0,
-                NSColor::colorWithSRGBRed_green_blue_alpha(0.24, 0.27, 0.34, 0.58),
-                NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.12),
+                NSColor::clearColor(),
+                NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.09),
             );
+            button.setAlphaValue(opacity);
             let chevron = NSImageView::new(mtm);
-            chevron.setContentTintColor(Some(&NSColor::colorWithCalibratedWhite_alpha(1.0, 0.92)));
-            button.addSubview(&chevron);
+            chevron.setContentTintColor(Some(&NSColor::textColor()));
 
             container.addSubview(&button);
+            container.addSubview(&chevron);
             content.addSubview(&container);
 
             let overlay = Self {
@@ -237,18 +241,19 @@ mod overlay {
                 ),
                 NSSize::new(text_width, TEXT_LINE_HEIGHT),
             ));
-            self.button.setFrame(NSRect::new(
+            let button = NSRect::new(
                 NSPoint::new(layout.button.x, height - layout.button.y - layout.button.h),
                 NSSize::new(layout.button.w, layout.button.h),
-            ));
+            );
+            self.button.setFrame(button);
             self.button_tint.setFrame(NSRect::new(
                 NSPoint::new(0.0, 0.0),
                 NSSize::new(layout.button.w, layout.button.h),
             ));
             self.chevron.setFrame(NSRect::new(
                 NSPoint::new(
-                    (BUTTON_SIZE - CHEVRON_SIZE) / 2.0,
-                    (BUTTON_SIZE - CHEVRON_SIZE) / 2.0,
+                    button.origin.x + (BUTTON_SIZE - CHEVRON_SIZE) / 2.0,
+                    button.origin.y + (BUTTON_SIZE - CHEVRON_SIZE) / 2.0,
                 ),
                 NSSize::new(CHEVRON_SIZE, CHEVRON_SIZE),
             ));
@@ -261,6 +266,7 @@ mod overlay {
 
         pub fn set_opacity(&self, opacity: f64) {
             self.bubble.setAlphaValue(opacity);
+            self.button.setAlphaValue(opacity);
         }
 
         /// Hide the bubble and/or the button. The chevron follows the bubble:
@@ -270,6 +276,7 @@ mod overlay {
             self.title.setHidden(!bubble);
             self.subtitle.setHidden(!bubble);
             self.button.setHidden(!button);
+            self.chevron.setHidden(!button);
             let symbol = if bubble { "chevron.down" } else { "chevron.up" };
             if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
                 &NSString::from_str(symbol),
