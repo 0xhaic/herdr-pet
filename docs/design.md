@@ -30,6 +30,12 @@
 > （96 项）、`cargo build`、`cargo clippy --all-targets -- -D warnings` 全绿，
 > 已实机验证毛玻璃、实时文案、展开/收起、前台隐藏、error 保留、done 未读保留/
 > 已读消失、点击跳转、拖动不跳转与位置持久化。
+> v0.1.10：新增原生设置面板（宠物、宠物目录、尺寸、气泡不透明度、提醒/音效、
+> 凝视、点击穿透、聊天框开关），修改实时生效并写回；新增 `pets_dir` 与
+> `chat_opacity`；气泡与箭头按钮统一毛玻璃样式，文字颜色改用语义 textColor；
+> 托盘精简为显示/隐藏、设置、关于、退出。`cargo test`（100 项）、`cargo build`、
+> `cargo clippy --all-targets -- -D warnings` 全绿，已实机验证设置面板与现有
+> 聊天框、拖动及配置持久化行为。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
