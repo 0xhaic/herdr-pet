@@ -481,7 +481,8 @@ Socket 发现顺序：
   交回 winit，由 3.5 的矩形判定处理，避免 AppKit 视图吞掉按钮点击。
 - 文案：第一行 = 聚焦 agent 的 `notification_text()`（title → name → where →
   address）；第二行 = `status.msg`（程序自己的动作文案），为空时回退
-  `空闲 / 工作中 / 等待输入 / 已完成 / 出错了`。没有带状态的 agent 时显示
+  `空闲 / Thinking... / 等待输入 / 已完成 / 出错了`；working 的 `Thinking` 后省略号
+  按 400 ms 循环显示 1–3 个点。没有带状态的 agent 时显示
   `暂无任务 / 等待 agent 状态`。文本折叠空白并截断到 120 字符，避免异常长度。
 - Agent 图标：标题行左侧 14 × 14。读取 Herdr.app program 图标目录
   （`HERDR_APP_HOME` → `$XDG_CONFIG_HOME/herdr-app` → `~/.config/herdr-app` 下的
@@ -574,7 +575,8 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
   候选过滤与首个候选等于自动聚焦、`msg` / `app` 更新与清除、
   blocked/working/error 与未读 done 视为活跃。
 - `chat`：三段布局尺寸与居中、随宠物高度增长、矩形命中、气泡内箭头位于气泡内且
-  文字让出箭头宽度、两行文案回退、单行折叠与截断、agent 图标按 `app` → `name`
+  文字让出箭头宽度、两行文案回退、Thinking 省略号循环、单行折叠与截断、
+  agent 图标按 `app` → `name`
   → 通用图标的映射。
 - `herdr_app`：`view.json` attention 的 seen 地址解析。
 - `main`：点击 vs 拖动阈值、聊天 UI 可见性（活跃 + Herdr 非前台）、手动选择缺失时

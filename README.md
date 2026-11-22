@@ -10,7 +10,8 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 - **状态汇总**：汇总本机所有 herdr agent，一只宠物显示最紧急的状态，优先级
   `Blocked > Error > Working > Done > Idle`（Working 高于 Done，站立只表示有任务在执行）。
 - **聊天框**：宠物上方固定两行的毛玻璃气泡，显示最紧急 agent 的任务标题与最新动作
-  （`status.msg`，缺省回退中文状态）。标题行文字前显示 agent 图标，取自 Herdr.app
+  （`status.msg`；缺省回退中文状态，working 缺省显示省略号循环的 `Thinking...`）。
+  标题行文字前显示 agent 图标，取自 Herdr.app
   的 program 图标目录（`HERDR_APP_HOME/icons`）：已知 agent 使用对应品牌/单色图标，
   未知 agent 使用通用 agent 图标；Herdr.app 或图标文件不存在时自动不显示并恢复文字
   宽度。第二行文字前显示状态图标（空闲 `moon.zzz`、等待输入 `hand.raised`、已完成

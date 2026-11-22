@@ -794,7 +794,8 @@ impl App {
         if !self.bubble_visible() {
             return;
         }
-        let text = chat_text(self.focus_agent());
+        let elapsed_ms = self.started.elapsed().as_millis() as u64;
+        let text = chat_text(self.focus_agent(), elapsed_ms);
         if self.last_chat_text.as_ref() == Some(&text) {
             return;
         }
@@ -1027,8 +1028,10 @@ impl App {
             self.frame = self.animator.update(now_ms, input);
             self.next_anim_ms = self.animator.next_deadline_ms(now_ms).unwrap_or(u64::MAX);
             self.last_anim_input = Some(input);
-            self.sync_chat();
         }
+        // The Thinking placeholder animates on its own clock, so refresh the
+        // bubble every tick; `sync_chat` only touches AppKit when text changes.
+        self.sync_chat();
         let frame = self.frame;
 
         self.update_cursor(local, frame);

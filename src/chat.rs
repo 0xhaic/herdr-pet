@@ -31,6 +31,8 @@ pub const ARROW_RESERVED: f64 = ARROW_INSET + ARROW_SIZE * 2.0 + ARROW_GAP;
 
 /// Longest text handed to a single label line; the label truncates the rest.
 const MAX_TEXT_CHARS: usize = 120;
+/// Dot cadence for the Working placeholder while the agent reports no action.
+const THINKING_DOT_MS: u64 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -208,23 +210,27 @@ pub struct ChatText {
 }
 
 /// Two lines for the bubble: the focused agent's task title and its latest
-/// action (`status.msg`), falling back to a localized state word.
-pub fn chat_text(agent: Option<&TerminalAgent>) -> ChatText {
+/// action (`status.msg`), falling back to a localized state word. Working
+/// agents without an action show a `Thinking...` placeholder whose ellipsis
+/// cycles one to three dots with `elapsed_ms`.
+pub fn chat_text(agent: Option<&TerminalAgent>, elapsed_ms: u64) -> ChatText {
     match agent {
         Some(agent) => {
             let title = one_line(&agent.notification_text());
+            let status = agent.status.unwrap_or(AgentStatus::Idle);
             let subtitle = agent
                 .status_msg()
                 .map(one_line)
                 .filter(|text| !text.is_empty())
-                .unwrap_or_else(|| {
-                    status_label(agent.status.unwrap_or(AgentStatus::Idle)).to_owned()
+                .unwrap_or_else(|| match status {
+                    AgentStatus::Working => thinking_label(elapsed_ms),
+                    status => status_label(status).to_owned(),
                 });
             ChatText {
                 title,
                 subtitle,
                 icon: Some(agent_icon(agent.app.as_deref(), agent.name.as_deref())),
-                status: Some(agent.status.unwrap_or(AgentStatus::Idle)),
+                status: Some(status),
             }
         }
         None => ChatText {
@@ -234,6 +240,12 @@ pub fn chat_text(agent: Option<&TerminalAgent>) -> ChatText {
             status: None,
         },
     }
+}
+
+/// `Thinking.` / `Thinking..` / `Thinking...`, cycling with the UI clock.
+fn thinking_label(elapsed_ms: u64) -> String {
+    let dots = 1 + (elapsed_ms / THINKING_DOT_MS) % 3;
+    format!("Thinking{}", ".".repeat(dots as usize))
 }
 
 /// SF Symbol shown before the subtitle for each state. `Working` renders as
@@ -399,7 +411,7 @@ mod tests {
             terminal("t2", "live", Some("blocked"), "Permission needed"),
         ]);
         assert_eq!(
-            chat_text(table.focus_with(|_| false)),
+            chat_text(table.focus_with(|_| false), 0),
             ChatText {
                 title: "t2 title".to_owned(),
                 subtitle: "Permission needed".to_owned(),
@@ -413,16 +425,43 @@ mod tests {
     fn text_falls_back_to_localized_state_and_placeholder() {
         let mut table = StatusTable::new();
         table.apply_snapshot(vec![terminal("t1", "live", Some("done"), "")]);
-        assert_eq!(chat_text(table.focus_with(|_| true)).subtitle, "已完成");
+        assert_eq!(chat_text(table.focus_with(|_| true), 0).subtitle, "已完成");
 
         assert_eq!(
-            chat_text(None),
+            chat_text(None, 0),
             ChatText {
                 title: "暂无任务".to_owned(),
                 subtitle: "等待 agent 状态".to_owned(),
                 icon: None,
                 status: None
             }
+        );
+    }
+
+    #[test]
+    fn working_without_a_subtitle_cycles_thinking_dots() {
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal("t1", "live", Some("working"), "")]);
+        let subtitle = |elapsed_ms| chat_text(table.focus_with(|_| false), elapsed_ms).subtitle;
+        assert_eq!(subtitle(0), "Thinking.");
+        assert_eq!(subtitle(399), "Thinking.");
+        assert_eq!(subtitle(400), "Thinking..");
+        assert_eq!(subtitle(799), "Thinking..");
+        assert_eq!(subtitle(800), "Thinking...");
+        assert_eq!(subtitle(1_199), "Thinking...");
+        assert_eq!(subtitle(1_200), "Thinking.");
+
+        // The agent's own action keeps precedence over the placeholder.
+        let mut table = StatusTable::new();
+        table.apply_snapshot(vec![terminal(
+            "t1",
+            "live",
+            Some("working"),
+            "Running tests",
+        )]);
+        assert_eq!(
+            chat_text(table.focus_with(|_| false), 400).subtitle,
+            "Running tests"
         );
     }
 
