@@ -1,9 +1,10 @@
 //! Chat bubble geometry and text, kept free of windowing so it stays testable.
 //!
-//! The window is wider than the pet: the bubble spans a Codex-like 320 pt at
-//! the top, the pet sits centred in the middle, and the toggle button sits
-//! below it. Collapsing only hides the bubble views; the window keeps its size
-//! so the pet never jumps.
+//! The window is wider than the pet: the bubble spans a Codex-like 320 pt, the
+//! pet sits centred horizontally, and the toggle button sits below it. The
+//! bubble defaults to the row above the pet; near a screen edge it can flip
+//! below the button or slide sideways inside the window. Collapsing only hides
+//! the bubble views; the window keeps its size so the pet never jumps.
 
 use crate::status::{AgentStatus, TerminalAgent};
 
@@ -19,6 +20,10 @@ pub const BUTTON_SIZE: f64 = 28.0;
 pub const BUTTON_GAP: f64 = 6.0;
 /// Transparent margin around the UI so rounded edges are not clipped.
 pub const WINDOW_PAD: f64 = 8.0;
+/// Space the bubble needs above the pet: gap plus bubble height.
+pub const BUBBLE_ABOVE_SPACE: f64 = BUBBLE_GAP + BUBBLE_HEIGHT;
+/// Space the bubble needs below the pet: button, its gap, and the bubble.
+pub const BUBBLE_BELOW_SPACE: f64 = BUTTON_GAP + BUTTON_SIZE + BUBBLE_GAP + BUBBLE_HEIGHT;
 /// Previous/next agent arrows inside the bubble's trailing end, shown while
 /// several agents need the bubble.
 pub const ARROW_SIZE: f64 = 22.0;
@@ -52,6 +57,17 @@ impl Rect {
     }
 }
 
+/// Where the bubble sits relative to the pet. The default is centred above
+/// the pet; screen-edge avoidance slides it sideways or flips it below.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BubblePlacement {
+    /// Put the bubble under the pet's toggle button instead of above it.
+    pub below: bool,
+    /// Horizontal offset from the centred position, in logical points;
+    /// positive moves the bubble right.
+    pub shift_x: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ChatLayout {
     /// Window size in logical points.
@@ -65,17 +81,29 @@ pub struct ChatLayout {
     /// Previous/next agent arrows inside the bubble, top-left origin.
     pub prev_arrow: Rect,
     pub next_arrow: Rect,
+    /// Placement this layout was built from, with the shift clamped to the
+    /// window's slide range.
+    pub placement: BubblePlacement,
 }
 
 impl ChatLayout {
+    /// Default placement: bubble centred above the pet.
     pub fn new(pet_height: f64) -> Self {
+        Self::placed(pet_height, BubblePlacement::default())
+    }
+
+    /// Build the layout for a bubble placement. The window is wide enough for
+    /// the bubble to slide until either edge lines up with the pet's, so the
+    /// pet's screen position never has to change when the bubble avoids an
+    /// edge.
+    pub fn placed(pet_height: f64, placement: BubblePlacement) -> Self {
         let pet_height = if pet_height.is_finite() && pet_height > 0.0 {
             pet_height
         } else {
             crate::config::DEFAULT_SIZE
         };
         let pet_width = pet_height * crate::pet::CELL_W as f64 / crate::pet::CELL_H as f64;
-        let width = BUBBLE_WIDTH + WINDOW_PAD * 2.0;
+        let width = BUBBLE_WIDTH * 2.0 + WINDOW_PAD * 2.0 - pet_width;
         let height = WINDOW_PAD
             + BUBBLE_HEIGHT
             + BUBBLE_GAP
@@ -83,15 +111,29 @@ impl ChatLayout {
             + BUTTON_GAP
             + BUTTON_SIZE
             + WINDOW_PAD;
-        let bubble_y = WINDOW_PAD;
-        let pet_y = bubble_y + BUBBLE_HEIGHT + BUBBLE_GAP;
-        let button_y = pet_y + pet_height + BUTTON_GAP;
-        let next_arrow_x = (width + BUBBLE_WIDTH) / 2.0 - ARROW_INSET - ARROW_SIZE;
+        let max_shift = ((BUBBLE_WIDTH - pet_width) / 2.0).max(0.0);
+        let shift = if placement.shift_x.is_finite() {
+            placement.shift_x.clamp(-max_shift, max_shift)
+        } else {
+            0.0
+        };
+        let bubble_x = (width - BUBBLE_WIDTH) / 2.0 + shift;
+        let (bubble_y, pet_y, button_y) = if placement.below {
+            let pet_y = WINDOW_PAD;
+            let button_y = pet_y + pet_height + BUTTON_GAP;
+            let bubble_y = button_y + BUTTON_SIZE + BUBBLE_GAP;
+            (bubble_y, pet_y, button_y)
+        } else {
+            let bubble_y = WINDOW_PAD;
+            let pet_y = bubble_y + BUBBLE_HEIGHT + BUBBLE_GAP;
+            (bubble_y, pet_y, pet_y + pet_height + BUTTON_GAP)
+        };
+        let next_arrow_x = bubble_x + BUBBLE_WIDTH - ARROW_INSET - ARROW_SIZE;
         let arrow_y = bubble_y + (BUBBLE_HEIGHT - ARROW_SIZE) / 2.0;
         Self {
             window: (width, height),
             bubble: Rect {
-                x: (width - BUBBLE_WIDTH) / 2.0,
+                x: bubble_x,
                 y: bubble_y,
                 w: BUBBLE_WIDTH,
                 h: BUBBLE_HEIGHT,
@@ -120,6 +162,10 @@ impl ChatLayout {
                 y: arrow_y,
                 w: ARROW_SIZE,
                 h: ARROW_SIZE,
+            },
+            placement: BubblePlacement {
+                below: placement.below,
+                shift_x: shift,
             },
         }
     }
@@ -316,29 +362,30 @@ mod tests {
     #[test]
     fn layout_centres_bubble_pet_and_button() {
         let layout = ChatLayout::new(104.0);
-        assert_eq!(layout.window, (336.0, 234.0));
+        assert_eq!(layout.window, (560.0, 234.0));
         assert_eq!(
             layout.bubble,
             Rect {
-                x: 8.0,
+                x: 120.0,
                 y: 8.0,
                 w: 320.0,
                 h: 64.0
             }
         );
-        assert_eq!(layout.pet.x, 120.0);
+        assert_eq!(layout.pet.x, 232.0);
         assert_eq!(layout.pet.y, 88.0);
         assert_eq!(layout.pet.w, 96.0);
         assert_eq!(layout.pet.h, 104.0);
         assert_eq!(
             layout.button,
             Rect {
-                x: 188.0,
+                x: 300.0,
                 y: 198.0,
                 w: 28.0,
                 h: 28.0
             }
         );
+        assert_eq!(layout.placement, BubblePlacement::default());
     }
 
     #[test]
@@ -347,7 +394,7 @@ mod tests {
         assert_eq!(
             layout.next_arrow,
             Rect {
-                x: 298.0,
+                x: 410.0,
                 y: 29.0,
                 w: 22.0,
                 h: 22.0
@@ -356,7 +403,7 @@ mod tests {
         assert_eq!(
             layout.prev_arrow,
             Rect {
-                x: 272.0,
+                x: 384.0,
                 y: 29.0,
                 w: 22.0,
                 h: 22.0
@@ -376,16 +423,84 @@ mod tests {
     }
 
     #[test]
-    fn layout_grows_vertically_with_pet_size() {
+    fn layout_grows_vertically_and_narrows_with_pet_size() {
         let small = ChatLayout::new(52.0);
         let large = ChatLayout::new(312.0);
-        assert_eq!(small.window.0, large.window.0);
         assert_eq!(large.window.1 - small.window.1, 260.0);
+        assert!(large.window.0 < small.window.0);
         assert_eq!(large.bubble.y, small.bubble.y);
         assert_eq!(large.pet.y, small.pet.y);
         assert!(large.pet.x < small.pet.x);
         assert_eq!(large.button.x, large.pet.x + large.pet.w - BUTTON_SIZE);
         assert_eq!(small.button.x, small.pet.x + small.pet.w - BUTTON_SIZE);
+    }
+
+    #[test]
+    fn bubble_can_flip_below_and_slide_within_the_window() {
+        let below = ChatLayout::placed(
+            104.0,
+            BubblePlacement {
+                below: true,
+                shift_x: 0.0,
+            },
+        );
+        assert_eq!(below.window, (560.0, 234.0));
+        assert_eq!(below.pet.y, 8.0);
+        assert_eq!(below.button.y, 118.0);
+        assert_eq!(below.bubble.y, 162.0);
+        assert_eq!(below.bubble.x, 120.0);
+        assert!(below.placement.below);
+
+        // The bubble may slide until either edge lines up with the pet's.
+        let left = ChatLayout::placed(
+            104.0,
+            BubblePlacement {
+                below: false,
+                shift_x: 112.0,
+            },
+        );
+        assert_eq!(left.bubble.x, left.pet.x);
+        assert_eq!(left.bubble.x + left.bubble.w, left.window.0 - WINDOW_PAD);
+        let right = ChatLayout::placed(
+            104.0,
+            BubblePlacement {
+                below: false,
+                shift_x: -112.0,
+            },
+        );
+        assert_eq!(right.bubble.x, WINDOW_PAD);
+        assert_eq!(right.bubble.x + right.bubble.w, right.pet.x + right.pet.w);
+
+        // Out-of-range and non-finite shifts are clamped or ignored.
+        let clamped = ChatLayout::placed(
+            104.0,
+            BubblePlacement {
+                below: false,
+                shift_x: 1_000.0,
+            },
+        );
+        assert_eq!(clamped.bubble.x, clamped.pet.x);
+        assert_eq!(clamped.placement.shift_x, 112.0);
+        let fallback = ChatLayout::placed(
+            104.0,
+            BubblePlacement {
+                below: false,
+                shift_x: f64::NAN,
+            },
+        );
+        assert_eq!(fallback.bubble.x, 120.0);
+        assert_eq!(fallback.placement.shift_x, 0.0);
+
+        for layout in [below, left, right] {
+            assert!(layout.bubble.x >= 0.0);
+            assert!(layout.bubble.x + layout.bubble.w <= layout.window.0);
+            assert!(layout.bubble.y >= 0.0);
+            assert!(layout.bubble.y + layout.bubble.h <= layout.window.1);
+            assert_eq!(
+                layout.prev_arrow.x,
+                layout.bubble.x + BUBBLE_WIDTH - ARROW_RESERVED
+            );
+        }
     }
 
     #[test]

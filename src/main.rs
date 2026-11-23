@@ -42,6 +42,9 @@ const HIDDEN_INTERVAL: Duration = Duration::from_millis(250);
 const CLICK_ALPHA: u8 = 16;
 /// Movement under this many logical points counts as a click, not a drag.
 const CLICK_SLOP: f64 = 3.0;
+/// Extra room above the pet needed before a flipped bubble returns to its
+/// default position, so hovering at the threshold does not flap it.
+const BUBBLE_RESTORE_MARGIN: f64 = 4.0;
 /// NSWorkspace is cheap, but 60 Hz is unnecessary for an app-level state.
 const FRONT_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -223,7 +226,10 @@ fn mood_for(status: Option<AgentStatus>, unseen_done: bool) -> Mood {
 struct Drag {
     start_mouse: (f64, f64),
     last_mouse: (f64, f64),
-    start_window: PhysicalPosition<i32>,
+    /// Pet top-left on screen when the drag started, in physical pixels. The
+    /// pet, not the window, follows the pointer so bubble flips and slides
+    /// leave it under the cursor.
+    start_pet: (f64, f64),
     dir: DragDir,
     /// Usable screen areas captured at drag start; the pet may cross them.
     areas: Vec<Rect>,
@@ -232,7 +238,7 @@ struct Drag {
 }
 
 /// Usable area of `monitor`: the screen with its top edge below the menu bar.
-/// The bubble and button may hang outside a screen; only the pet is bounded.
+/// The pet is clamped to it; the bubble is placed inside it where possible.
 fn screen_area(monitor: &MonitorHandle) -> Rect {
     let origin = monitor.position();
     let size = monitor.size();
@@ -245,36 +251,82 @@ fn screen_area(monitor: &MonitorHandle) -> Rect {
     }
 }
 
-/// Move a window top-left so the pet sprite stays on screen. A sprite fully
-/// covered by the screen areas keeps its position, so dragging across
-/// adjacent screens is smooth; otherwise it is clamped into the screen
+/// Clamp a pet sprite rectangle, in physical pixels, so it stays on screen. A
+/// sprite fully covered by the screen areas keeps its position, so dragging
+/// across adjacent screens is smooth; otherwise it is clamped into the screen
 /// holding its centre.
-fn clamp_pet_to_screens(
-    window: PhysicalPosition<i32>,
+fn clamp_pet_to_screens(pet: Rect, areas: &[Rect]) -> Rect {
+    if areas.is_empty() || covered_by_any(pet, areas) {
+        return pet;
+    }
+    let Some(area) = screen_for(pet, areas) else {
+        return pet;
+    };
+    Rect {
+        x: clamp_axis(pet.x, area.x, area.x + area.w - pet.w),
+        y: clamp_axis(pet.y, area.y, area.y + area.h - pet.h),
+        ..pet
+    }
+}
+
+/// Where to put the bubble around `pet` so it stays on screen. The bubble
+/// prefers its default above the pet; when the top cannot fit it, it flips
+/// below the button, and it slides sideways just enough to clear the screen
+/// edges. `current_below` adds a small margin before flipping back, so a drag
+/// hovering at the top threshold does not flap between the two rows.
+fn bubble_placement(
     pet: Rect,
     scale: f64,
     areas: &[Rect],
-) -> PhysicalPosition<i32> {
-    if areas.is_empty() {
-        return window;
+    current_below: bool,
+) -> chat::BubblePlacement {
+    if areas.is_empty() || !scale.is_finite() || scale <= 0.0 {
+        return chat::BubblePlacement::default();
     }
-    let offset = (pet.x * scale, pet.y * scale);
-    let target = Rect {
-        x: f64::from(window.x) + offset.0,
-        y: f64::from(window.y) + offset.1,
-        w: pet.w * scale,
-        h: pet.h * scale,
+    let Some(area) = screen_for(pet, areas) else {
+        return chat::BubblePlacement::default();
     };
-    if covered_by_any(target, areas) {
-        return window;
+    let above_need = chat::BUBBLE_ABOVE_SPACE * scale;
+    let below_need = chat::BUBBLE_BELOW_SPACE * scale;
+    let above_space = pet.y - area.y;
+    let below_space = area.y + area.h - (pet.y + pet.h);
+    let restore = if current_below {
+        BUBBLE_RESTORE_MARGIN * scale
+    } else {
+        0.0
+    };
+    let below = if above_space >= above_need + restore {
+        false
+    } else if below_space >= below_need {
+        true
+    } else {
+        // Neither row fits; take the one that overflows least.
+        below_space - below_need > above_space - above_need
+    };
+
+    let bubble_w = chat::BUBBLE_WIDTH * scale;
+    let bubble_h = chat::BUBBLE_HEIGHT * scale;
+    let bubble_y = if below {
+        pet.y + pet.h + chat::BUBBLE_BELOW_SPACE * scale - bubble_h
+    } else {
+        pet.y - chat::BUBBLE_ABOVE_SPACE * scale
+    };
+    let centered = pet.x + (pet.w - bubble_w) / 2.0;
+    let candidate = Rect {
+        x: centered,
+        y: bubble_y,
+        w: bubble_w,
+        h: bubble_h,
+    };
+    let shift = if covered_by_any(candidate, areas) {
+        0.0
+    } else {
+        clamp_axis(centered, area.x, area.x + area.w - bubble_w) - centered
+    };
+    chat::BubblePlacement {
+        below,
+        shift_x: shift / scale,
     }
-    let Some(area) = screen_for(target, areas) else {
-        return window;
-    };
-    PhysicalPosition::new(
-        (clamp_axis(target.x, area.x, area.x + area.w - target.w) - offset.0).round() as i32,
-        (clamp_axis(target.y, area.y, area.y + area.h - target.h) - offset.1).round() as i32,
-    )
 }
 
 /// Whether every point of `rect` lies inside the union of `areas`.
@@ -810,13 +862,57 @@ impl App {
         self.last_chat_text = Some(text);
     }
 
+    /// Layout for a pet sprite rectangle on screen, in physical pixels. The
+    /// pet size always comes from `config.size`; `pet` only carries where it
+    /// currently sits.
+    fn chat_layout_for_pet(&self, pet: Rect, scale: f64, areas: &[Rect]) -> ChatLayout {
+        let placement = bubble_placement(pet, scale, areas, self.chat_layout.placement.below);
+        ChatLayout::placed(self.config.size, placement)
+    }
+
+    /// Keep the pet anchored on screen while the bubble flips or slides as it
+    /// approaches a screen edge. Dragging computes the placement itself from
+    /// the pointer target, so this only runs once the pet has settled.
+    fn sync_bubble_placement(&mut self) {
+        if self.dragging.is_some() {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let Ok(position) = window.outer_position() else {
+            return;
+        };
+        let scale = window.scale_factor();
+        let areas: Vec<Rect> = window
+            .available_monitors()
+            .map(|monitor| screen_area(&monitor))
+            .collect();
+        if areas.is_empty() {
+            return;
+        }
+        let (origin_x, origin_y) = self.chat_layout.pet_origin();
+        let pet = Rect {
+            x: f64::from(position.x) + origin_x * scale,
+            y: f64::from(position.y) + origin_y * scale,
+            w: self.chat_layout.pet.w * scale,
+            h: self.chat_layout.pet.h * scale,
+        };
+        let layout = self.chat_layout_for_pet(pet, scale, &areas);
+        if layout == self.chat_layout {
+            return;
+        }
+        self.chat_layout = layout;
+        window.set_outer_position(PhysicalPosition::new(
+            (pet.x - layout.pet.x * scale).round() as i32,
+            (pet.y - layout.pet.y * scale).round() as i32,
+        ));
+        self.force_redraw = true;
+    }
+
     /// Refresh the logical layout and refit the native views after a resize or
     /// a size change. AppKit frames are in point coordinates.
     fn sync_overlay(&mut self) {
-        let layout = ChatLayout::new(self.config.size);
-        if layout != self.chat_layout {
-            self.chat_layout = layout;
-        }
         let Some(window) = &self.window else {
             return;
         };
@@ -880,13 +976,19 @@ impl App {
                 .available_monitors()
                 .map(|monitor| screen_area(&monitor))
                 .collect();
+            let scale = window.scale_factor();
+            let (origin_x, origin_y) = self.chat_layout.pet_origin();
+            let start_pet = (
+                f64::from(position.x) + origin_x * scale,
+                f64::from(position.y) + origin_y * scale,
+            );
             self.dragging = Some(Drag {
                 start_mouse: pointer,
                 last_mouse: pointer,
-                start_window: position,
+                start_pet,
                 dir: DragDir::Right,
                 areas,
-                scale: window.scale_factor(),
+                scale,
             });
             self.click_candidate = Some(pointer);
             self.set_cursor_hittest(true);
@@ -914,13 +1016,19 @@ impl App {
         drag.dir = step_dir(drag.dir, pointer.0 - drag.last_mouse.0);
         drag.last_mouse = pointer;
         if let Some(window) = self.window.clone() {
-            let target = PhysicalPosition::new(
-                (drag.start_window.x as f64 + dx).round() as i32,
-                (drag.start_window.y as f64 + dy).round() as i32,
-            );
-            let position =
-                clamp_pet_to_screens(target, self.chat_layout.pet, drag.scale, &drag.areas);
-            window.set_outer_position(position);
+            let target = Rect {
+                x: drag.start_pet.0 + dx,
+                y: drag.start_pet.1 + dy,
+                w: self.chat_layout.pet.w * drag.scale,
+                h: self.chat_layout.pet.h * drag.scale,
+            };
+            let pet = clamp_pet_to_screens(target, &drag.areas);
+            let layout = self.chat_layout_for_pet(pet, drag.scale, &drag.areas);
+            self.chat_layout = layout;
+            window.set_outer_position(PhysicalPosition::new(
+                (pet.x - layout.pet.x * drag.scale).round() as i32,
+                (pet.y - layout.pet.y * drag.scale).round() as i32,
+            ));
         }
         self.dragging = Some(drag);
     }
@@ -1002,13 +1110,16 @@ impl App {
         self.refresh_herdr_frontmost();
         self.update_chat_enabled();
         self.reconcile_chat_selection();
-        self.sync_overlay();
         let pointer = self.pointer();
+        self.update_drag(pointer);
+        self.sync_bubble_placement();
+        self.sync_overlay();
+        // Sample the window after any drag or bubble-flip move so pointer
+        // coordinates, gaze and hover all use the current geometry.
         let snapshot = self.window.as_deref().and_then(WindowSnapshot::new);
         let local = snapshot
             .zip(pointer)
             .map(|(snapshot, pointer)| snapshot.local_point(pointer));
-        self.update_drag(pointer);
         let gaze = snapshot.and_then(|snapshot| self.gaze(snapshot, pointer));
         let hover = self.hovered(local);
         let dragging = self.dragging.as_ref().map(|drag| drag.dir);
@@ -1213,7 +1324,7 @@ impl App {
 
     fn apply_size(&mut self, height: f64) {
         self.config.size = clamp_size(height);
-        let layout = ChatLayout::new(self.config.size);
+        let layout = ChatLayout::placed(self.config.size, self.chat_layout.placement);
         self.chat_layout = layout;
         if let Some(window) = &self.window {
             let _ = window.request_inner_size(LogicalSize::new(layout.window.0, layout.window.1));
@@ -1312,20 +1423,13 @@ impl ApplicationHandler for App {
         }
         self.chat_layout = ChatLayout::new(self.config.size);
         let (width, height) = self.chat_layout.window;
-        let physical_width = (width * self.primary_scale).round() as i32;
-        let physical_height = (height * self.primary_scale).round() as i32;
+        let pet_width = (self.chat_layout.pet.w * self.primary_scale).round() as i32;
+        let pet_height = (self.chat_layout.pet.h * self.primary_scale).round() as i32;
         let position = self
             .config
             .position
-            .map(|position| anchor_to_window(position, &self.chat_layout, self.primary_scale))
-            .filter(|position| {
-                position_visible(
-                    event_loop,
-                    [position.x, position.y],
-                    physical_width,
-                    physical_height,
-                )
-            })
+            .filter(|anchor| pet_visible(event_loop, *anchor, pet_width, pet_height))
+            .map(|anchor| anchor_to_window(anchor, &self.chat_layout, self.primary_scale))
             .unwrap_or_else(|| default_position(event_loop, &self.chat_layout));
         let attributes = Window::default_attributes()
             .with_title("herdr-pet")
@@ -1377,6 +1481,7 @@ impl ApplicationHandler for App {
         self.set_cursor_hittest(!self.config.click_through);
         self.herdr_frontmost = platform::herdr_app_frontmost();
         self.next_front_check = Instant::now() + FRONT_CHECK_INTERVAL;
+        self.sync_bubble_placement();
         self.sync_overlay();
         self.sync_chat();
         // Start hidden until the first snapshot says an agent is active.
@@ -1400,6 +1505,7 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                self.sync_bubble_placement();
                 self.force_redraw = true;
                 self.next_tick = Instant::now();
             }
@@ -1444,12 +1550,10 @@ impl ApplicationHandler for App {
     }
 }
 
-fn position_visible(
-    event_loop: &ActiveEventLoop,
-    position: [i32; 2],
-    width: i32,
-    height: i32,
-) -> bool {
+/// Whether a pet rectangle overlaps any monitor. The window's transparent
+/// overhang is much wider than the pet, so the window rect must not stand in
+/// for the pet here.
+fn pet_visible(event_loop: &ActiveEventLoop, position: [i32; 2], width: i32, height: i32) -> bool {
     event_loop.available_monitors().any(|monitor| {
         let origin = monitor.position();
         let size = monitor.size();
@@ -1468,10 +1572,13 @@ fn default_position(event_loop: &ActiveEventLoop, layout: &ChatLayout) -> Physic
     let margin = (EDGE_MARGIN * scale).round() as i32;
     let width = (layout.window.0 * scale).round() as i32;
     let height = (layout.window.1 * scale).round() as i32;
+    // The window grew sideways to let the bubble slide; centre that extra
+    // width so the default pet position matches the old bubble-sized window.
+    let base_width = ((chat::BUBBLE_WIDTH + chat::WINDOW_PAD * 2.0) * scale).round() as i32;
     let size = monitor.size();
     let position = monitor.position();
     PhysicalPosition::new(
-        position.x + size.width as i32 - width - margin,
+        position.x + size.width as i32 - margin - base_width - (width - base_width) / 2,
         position.y + size.height as i32 - height - margin,
     )
 }
@@ -1611,65 +1718,70 @@ mod tests {
         assert!(chat_bubble_visible(true, true, true));
     }
 
-    fn pet_in_window() -> Rect {
+    #[test]
+    fn saved_pet_anchor_round_trips_through_the_window_origin() {
+        let layout = ChatLayout::placed(
+            104.0,
+            chat::BubblePlacement {
+                below: true,
+                shift_x: 112.0,
+            },
+        );
+        let anchor = [100, 200];
+        let window = anchor_to_window(anchor, &layout, 2.0);
+        // Mirrors `App::save_config`, so a toggle or restart keeps the pet
+        // exactly where the anchor says, independent of the bubble layout.
+        assert_eq!(
+            [
+                window.x + (layout.pet.x * 2.0).round() as i32,
+                window.y + (layout.pet.y * 2.0).round() as i32,
+            ],
+            anchor
+        );
+    }
+
+    fn pet_at(x: f64, y: f64) -> Rect {
         Rect {
-            x: 120.0,
-            y: 88.0,
+            x,
+            y,
             w: 96.0,
             h: 104.0,
         }
     }
 
-    fn pet_top_left(position: PhysicalPosition<i32>, pet: Rect, scale: f64) -> (f64, f64) {
-        (
-            f64::from(position.x) + pet.x * scale,
-            f64::from(position.y) + pet.y * scale,
-        )
+    fn default_area() -> Rect {
+        Rect {
+            x: 0.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
+        }
     }
 
     #[test]
     fn pet_drag_is_clamped_inside_the_screen_below_the_menu_bar() {
-        let area = Rect {
-            x: 0.0,
-            y: 25.0,
-            w: 1440.0,
-            h: 875.0,
-        };
-        let pet = pet_in_window();
-        let areas = [area];
+        let areas = [default_area()];
 
         // The pet never enters the menu bar, even when dragged far past it.
-        let top_left = clamp_pet_to_screens(PhysicalPosition::new(-5000, -5000), pet, 2.0, &areas);
-        assert_eq!(pet_top_left(top_left, pet, 2.0), (0.0, 25.0));
+        let top_left = clamp_pet_to_screens(pet_at(-5000.0, -5000.0), &areas);
+        assert_eq!((top_left.x, top_left.y), (0.0, 25.0));
+        assert_eq!((top_left.w, top_left.h), (96.0, 104.0));
 
         // Nor does it leave the right or bottom edge.
-        let bottom_right =
-            clamp_pet_to_screens(PhysicalPosition::new(5000, 5000), pet, 2.0, &areas);
+        let bottom_right = clamp_pet_to_screens(pet_at(5000.0, 5000.0), &areas);
         assert_eq!(
-            pet_top_left(bottom_right, pet, 2.0),
-            (f64::from(1440 - 96 * 2), f64::from(25 + 875 - 104 * 2))
+            (bottom_right.x, bottom_right.y),
+            (f64::from(1440 - 96), f64::from(25 + 875 - 104))
         );
 
         // Positions already inside the screen are left alone.
-        let inside = PhysicalPosition::new(500, 300);
-        assert_eq!(clamp_pet_to_screens(inside, pet, 2.0, &areas), inside);
-
-        // Non-Retina screens use the same rules.
-        let standard = clamp_pet_to_screens(PhysicalPosition::new(5000, 5000), pet, 1.0, &areas);
-        assert_eq!(
-            pet_top_left(standard, pet, 1.0),
-            (f64::from(1440 - 96), f64::from(25 + 875 - 104))
-        );
+        let inside = pet_at(500.0, 300.0);
+        assert_eq!(clamp_pet_to_screens(inside, &areas), inside);
     }
 
     #[test]
     fn pet_drag_crosses_adjacent_screens_without_a_jump() {
-        let left = Rect {
-            x: 0.0,
-            y: 25.0,
-            w: 1440.0,
-            h: 875.0,
-        };
+        let left = default_area();
         let right = Rect {
             x: 1440.0,
             y: 25.0,
@@ -1677,32 +1789,22 @@ mod tests {
             h: 875.0,
         };
         let areas = [left, right];
-        let pet = pet_in_window();
 
         // The sprite straddles the shared edge; both screens cover it.
-        let straddling = PhysicalPosition::new(1280, 500);
-        assert_eq!(pet_top_left(straddling, pet, 1.0), (1400.0, 588.0));
-        assert_eq!(
-            clamp_pet_to_screens(straddling, pet, 1.0, &areas),
-            straddling
-        );
+        let straddling = pet_at(1400.0, 588.0);
+        assert_eq!(clamp_pet_to_screens(straddling, &areas), straddling);
 
         // Beyond the outer edge it stops at the right screen's edge.
-        let far_right = clamp_pet_to_screens(PhysicalPosition::new(5000, 500), pet, 1.0, &areas);
+        let far_right = clamp_pet_to_screens(pet_at(5000.0, 500.0), &areas);
         assert_eq!(
-            pet_top_left(far_right, pet, 1.0),
-            (f64::from(1440 + 1440 - 96), 588.0)
+            (far_right.x, far_right.y),
+            (f64::from(1440 + 1440 - 96), 500.0)
         );
     }
 
     #[test]
     fn pet_drag_does_not_enter_the_gap_between_screens() {
-        let left = Rect {
-            x: 0.0,
-            y: 25.0,
-            w: 1440.0,
-            h: 875.0,
-        };
+        let left = default_area();
         let right = Rect {
             x: 2000.0,
             y: 25.0,
@@ -1710,16 +1812,11 @@ mod tests {
             h: 875.0,
         };
         let areas = [left, right];
-        let pet = pet_in_window();
 
-        // Sprite left at 1470 sits entirely in the 560 px gap; its centre is
-        // nearer the left screen, so it is clamped to that screen's edge.
-        let in_gap = PhysicalPosition::new(1350, 500);
-        let clamped = clamp_pet_to_screens(in_gap, pet, 1.0, &areas);
-        assert_eq!(
-            pet_top_left(clamped, pet, 1.0),
-            (f64::from(1440 - 96), 588.0)
-        );
+        // The sprite straddles the left screen and the gap; its centre is on
+        // the left screen, so it is clamped to that screen's edge.
+        let in_gap = clamp_pet_to_screens(pet_at(1350.0, 588.0), &areas);
+        assert_eq!((in_gap.x, in_gap.y), (f64::from(1440 - 96), 588.0));
     }
 
     #[test]
@@ -1737,14 +1834,12 @@ mod tests {
             h: 875.0,
         };
         let areas = [primary, secondary];
-        let pet = pet_in_window();
 
-        let on_primary = clamp_pet_to_screens(PhysicalPosition::new(300, -5000), pet, 1.0, &areas);
-        assert_eq!(pet_top_left(on_primary, pet, 1.0), (420.0, 39.0));
+        let on_primary = clamp_pet_to_screens(pet_at(300.0, -5000.0), &areas);
+        assert_eq!((on_primary.x, on_primary.y), (300.0, 39.0));
 
-        let on_secondary =
-            clamp_pet_to_screens(PhysicalPosition::new(2300, -100), pet, 1.0, &areas);
-        assert_eq!(pet_top_left(on_secondary, pet, 1.0), (2420.0, 25.0));
+        let on_secondary = clamp_pet_to_screens(pet_at(2300.0, -100.0), &areas);
+        assert_eq!((on_secondary.x, on_secondary.y), (2300.0, 25.0));
     }
 
     #[test]
@@ -1755,9 +1850,128 @@ mod tests {
             w: 100.0,
             h: 80.0,
         };
-        let pet = pet_in_window();
-        let clamped = clamp_pet_to_screens(PhysicalPosition::new(500, 300), pet, 2.0, &[tiny]);
-        assert_eq!(pet_top_left(clamped, pet, 2.0), (0.0, 25.0));
+        let pet = Rect {
+            x: 500.0,
+            y: 300.0,
+            w: 192.0,
+            h: 208.0,
+        };
+        let clamped = clamp_pet_to_screens(pet, &[tiny]);
+        assert_eq!((clamped.x, clamped.y), (0.0, 25.0));
+    }
+
+    #[test]
+    fn bubble_defaults_to_above_a_centred_pet() {
+        let placement = bubble_placement(pet_at(600.0, 300.0), 1.0, &[default_area()], false);
+        assert_eq!(placement, chat::BubblePlacement::default());
+    }
+
+    #[test]
+    fn bubble_flips_below_when_the_top_edge_leaves_no_room() {
+        let placement = bubble_placement(pet_at(600.0, 25.0), 1.0, &[default_area()], false);
+        assert_eq!(
+            placement,
+            chat::BubblePlacement {
+                below: true,
+                shift_x: 0.0
+            }
+        );
+
+        // The bottom edge still has room for the default row.
+        let bottom = bubble_placement(pet_at(600.0, 796.0), 1.0, &[default_area()], false);
+        assert_eq!(bottom, chat::BubblePlacement::default());
+    }
+
+    #[test]
+    fn bubble_slides_to_stay_inside_the_side_edges() {
+        let area = default_area();
+        let left = bubble_placement(pet_at(0.0, 300.0), 1.0, &[area], false);
+        assert_eq!(
+            left,
+            chat::BubblePlacement {
+                below: false,
+                shift_x: 112.0
+            }
+        );
+        let right = bubble_placement(pet_at(1344.0, 300.0), 1.0, &[area], false);
+        assert_eq!(
+            right,
+            chat::BubblePlacement {
+                below: false,
+                shift_x: -112.0
+            }
+        );
+
+        // Corners combine the flip and the slide.
+        let top_left = bubble_placement(pet_at(0.0, 25.0), 1.0, &[area], false);
+        assert_eq!(
+            top_left,
+            chat::BubblePlacement {
+                below: true,
+                shift_x: 112.0
+            }
+        );
+        let top_right = bubble_placement(pet_at(1344.0, 25.0), 1.0, &[area], false);
+        assert_eq!(
+            top_right,
+            chat::BubblePlacement {
+                below: true,
+                shift_x: -112.0
+            }
+        );
+    }
+
+    #[test]
+    fn bubble_restores_only_after_clearing_the_top_edge() {
+        let area = default_area();
+        // 82 px of headroom: enough above, but inside the flip-back margin.
+        assert_eq!(
+            bubble_placement(pet_at(600.0, 107.0), 1.0, &[area], false),
+            chat::BubblePlacement::default()
+        );
+        assert_eq!(
+            bubble_placement(pet_at(600.0, 107.0), 1.0, &[area], true),
+            chat::BubblePlacement {
+                below: true,
+                shift_x: 0.0
+            }
+        );
+        // 84 px clears the margin and returns to the default row.
+        assert_eq!(
+            bubble_placement(pet_at(600.0, 109.0), 1.0, &[area], true),
+            chat::BubblePlacement::default()
+        );
+    }
+
+    #[test]
+    fn bubble_takes_the_row_that_overflows_least_on_a_short_screen() {
+        // Neither row fits: 79 px above and 100 px below, needing 80 and 114.
+        // Above overflows by one point; below would overflow by fourteen.
+        let short = Rect {
+            x: 0.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 283.0,
+        };
+        let placement = bubble_placement(pet_at(600.0, 104.0), 1.0, &[short], false);
+        assert_eq!(placement, chat::BubblePlacement::default());
+    }
+
+    #[test]
+    fn bubble_does_not_slide_at_the_seam_between_screens() {
+        let left = default_area();
+        let right = Rect {
+            x: 1440.0,
+            y: 25.0,
+            w: 1440.0,
+            h: 875.0,
+        };
+        let placement = bubble_placement(pet_at(1392.0, 300.0), 1.0, &[left, right], false);
+        assert_eq!(
+            placement,
+            chat::BubblePlacement::default(),
+            "the union of both screens covers the centred bubble"
+        );
     }
 
     #[test]
