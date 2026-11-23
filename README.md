@@ -119,10 +119,10 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 推送到 GitHub 后，`.github/workflows/macos-release.yml` 可在 CI 中打包：
 
-- 推送 `v*` tag（如 `v0.1.18`）自动触发，或从 Actions 页面手动触发；
+- 推送 `v*` tag（如 `v0.1.19`）自动触发，或从 Actions 页面手动触发；
 - tag 构建先校验 tag 名与 `Cargo.toml`、`Cargo.lock` 中的版本一致，不一致直接失败；
 - 发布前必须在 `docs/release-notes/<tag>.md` 编写版本说明（如
-  `docs/release-notes/v0.1.18.md`）；tag 构建校验文件存在，旧 tag 缺失时从默认
+  `docs/release-notes/v0.1.19.md`）；tag 构建校验文件存在，旧 tag 缺失时从默认
   分支读取，仍缺失直接失败；
 - 先运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
 - 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.dmg` 并上传为 artifact；
