@@ -6,7 +6,7 @@ mod macos;
 pub use macos::{
     ChatOverlay, SettingsPanel, allow_window_above_menu_bar, float_on_all_spaces,
     herdr_app_frontmost, herdr_app_path, left_button_down, menu_bar_height, mouse_position,
-    send_notification, show_about,
+    send_notification, show_about, show_context_menu,
 };
 
 /// Settings-panel controls the app should apply. The panel itself is
@@ -20,6 +20,7 @@ pub enum PanelAction {
     SetNotificationSound(bool),
     SetGaze(bool),
     SetClickThrough(bool),
+    SetHideTrayIcon(bool),
     SetChatOpen(bool),
     SetPetsDir(std::path::PathBuf),
     ResetPetsDir,
@@ -122,3 +123,6 @@ pub fn send_notification(_message: &str) -> bool {
 
 #[cfg(not(target_os = "macos"))]
 pub fn show_about() {}
+
+#[cfg(not(target_os = "macos"))]
+pub fn show_context_menu(_window: &winit::window::Window, _menu: &muda::Menu) {}

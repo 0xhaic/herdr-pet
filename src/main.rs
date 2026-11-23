@@ -450,6 +450,12 @@ fn chat_ui_available(is_active: bool, herdr_frontmost: bool) -> bool {
     is_active && !herdr_frontmost
 }
 
+/// The menu-bar icon hides only while the setting is on, click-through is
+/// off, and the pet is visible, so a mouse-reachable entry point remains.
+fn tray_icon_hidden(hide_tray_icon: bool, click_through: bool, pet_visible: bool) -> bool {
+    hide_tray_icon && !click_through && pet_visible
+}
+
 /// Blocked/error agents and unseen done force the bubble open regardless of
 /// Herdr being frontmost or the user having collapsed it.
 fn chat_bubble_visible(chat_enabled: bool, chat_open: bool, forced: bool) -> bool {
@@ -665,6 +671,54 @@ impl App {
         };
         let _ = window.set_cursor_hittest(hittest);
         self.cursor_hittest = Some(hittest);
+    }
+
+    /// Whether the menu-bar icon should stay hidden. The setting applies only
+    /// while click-through is off, because the pet's right-click menu needs
+    /// the mouse, and only while the pet is visible, because a hidden pet
+    /// would leave no way to reopen it.
+    fn tray_hidden(&self) -> bool {
+        let pet_visible = self
+            .window
+            .as_ref()
+            .is_none_or(|window| window.is_visible().unwrap_or(true));
+        tray_icon_hidden(
+            self.config.hide_tray_icon,
+            self.config.click_through,
+            pet_visible,
+        )
+    }
+
+    fn apply_tray_visibility(&mut self) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        if let Err(error) = tray.set_visible(!self.tray_hidden()) {
+            eprintln!("herdr-pet: cannot update the tray icon: {error:#}");
+        }
+    }
+
+    /// Right press on the pet opens the menu that the hidden menu-bar icon
+    /// would otherwise provide.
+    fn right_press(&mut self) {
+        if !self.tray_hidden() || self.dragging.is_some() {
+            return;
+        }
+        let Some(pointer) = self.pointer() else {
+            return;
+        };
+        let Some((x, y)) = self.local_point(pointer) else {
+            return;
+        };
+        if !self.chat_layout.pet.contains(x, y) {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        if let Some(tray) = &self.tray {
+            tray.show_pet_menu(&window);
+        }
     }
 
     /// Left press: the button toggles the bubble, the bubble opens Herdr at
@@ -1195,6 +1249,7 @@ impl App {
                         }
                         self.next_tick = Instant::now();
                     }
+                    self.apply_tray_visibility();
                 }
                 Action::Settings => self.open_panel(),
                 Action::About => platform::show_about(),
@@ -1247,6 +1302,7 @@ impl App {
                 }
                 PanelAction::SetGaze(enabled) => self.set_gaze(enabled),
                 PanelAction::SetClickThrough(enabled) => self.set_click_through(enabled),
+                PanelAction::SetHideTrayIcon(enabled) => self.set_hide_tray_icon(enabled),
                 PanelAction::SetChatOpen(open) => self.set_chat_open(open),
                 PanelAction::SetPetsDir(dir) => self.set_pets_dir(Some(dir)),
                 PanelAction::ResetPetsDir => self.set_pets_dir(None),
@@ -1311,6 +1367,14 @@ impl App {
             self.dragging = None;
         }
         self.set_cursor_hittest(!enabled);
+        self.apply_tray_visibility();
+        self.save_config();
+        self.sync_panel();
+    }
+
+    fn set_hide_tray_icon(&mut self, enabled: bool) {
+        self.config.hide_tray_icon = enabled;
+        self.apply_tray_visibility();
         self.save_config();
         self.sync_panel();
     }
@@ -1469,6 +1533,7 @@ impl ApplicationHandler for App {
             Ok(tray) => self.tray = Some(tray),
             Err(error) => eprintln!("herdr-pet: tray unavailable: {error:#}"),
         }
+        self.apply_tray_visibility();
         self.overlay =
             platform::ChatOverlay::new(&window, self.config.chat_open, self.config.chat_opacity);
         if self.overlay.is_none() {
@@ -1514,6 +1579,11 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => self.press(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => self.right_press(),
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
@@ -1696,6 +1766,14 @@ mod tests {
         assert_eq!(wrap_index(0, 1, 3), 1);
         assert_eq!(wrap_index(2, 1, 3), 0);
         assert_eq!(wrap_index(0, -1, 3), 2);
+    }
+
+    #[test]
+    fn tray_icon_hides_only_with_a_mouse_reachable_pet() {
+        assert!(tray_icon_hidden(true, false, true));
+        assert!(!tray_icon_hidden(true, true, true));
+        assert!(!tray_icon_hidden(true, false, false));
+        assert!(!tray_icon_hidden(false, false, true));
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub struct Config {
     /// Whole-window mouse pass-through; when true the pet ignores the mouse
     /// entirely and cannot be dragged.
     pub click_through: bool,
+    /// Hide the menu-bar icon. Applies only while `click_through` is off and
+    /// the pet window is visible, so a mouse-reachable entry point remains.
+    pub hide_tray_icon: bool,
     /// Whether the chat bubble above the pet is expanded.
     pub chat_open: bool,
     /// Opacity of the chat bubble's glass layer: 0.0 is fully transparent
@@ -48,6 +51,7 @@ impl Default for Config {
             notification_sound: true,
             gaze: true,
             click_through: false,
+            hide_tray_icon: false,
             chat_open: true,
             chat_opacity: DEFAULT_CHAT_OPACITY,
         }
@@ -164,6 +168,7 @@ mod tests {
         assert!(config.notification_sound);
         assert!(config.gaze);
         assert!(!config.click_through);
+        assert!(!config.hide_tray_icon);
         assert!(config.chat_open);
         assert_eq!(config.chat_opacity, 0.7);
     }
@@ -176,6 +181,7 @@ mod tests {
         assert!(config.notification_sound);
         assert!(config.gaze);
         assert!(!config.click_through);
+        assert!(!config.hide_tray_icon);
         assert!(config.chat_open);
         assert_eq!(config.chat_opacity, 0.7);
         assert_eq!(config.pets_dir, None);
@@ -195,6 +201,7 @@ mod tests {
             notification_sound: false,
             gaze: false,
             click_through: true,
+            hide_tray_icon: true,
             chat_open: false,
             chat_opacity: 0.4,
         };

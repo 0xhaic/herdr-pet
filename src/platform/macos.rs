@@ -159,6 +159,23 @@ pub fn show_about() {
     about::show();
 }
 
+/// Show `menu` as a context menu for the window's view. Must run on the main
+/// thread, which winit event callbacks guarantee; `None` places the menu at
+/// the pointer.
+pub fn show_context_menu(window: &Window, menu: &muda::Menu) {
+    use muda::ContextMenu;
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: the NSView stays alive for the window's lifetime, and the
+    // popup runs on the main thread inside an event callback.
+    unsafe { menu.show_context_menu_for_nsview(handle.ns_view.as_ptr().cast(), None) };
+}
+
 mod overlay {
     use std::cell::{Cell, RefCell};
     use std::path::{Path, PathBuf};
@@ -662,7 +679,7 @@ mod settings {
     use crate::platform::PanelAction;
 
     const WIDTH: f64 = 320.0;
-    const HEIGHT: f64 = 392.0;
+    const HEIGHT: f64 = 420.0;
     const PAD: f64 = 20.0;
     const LABEL_WIDTH: f64 = 96.0;
     const CONTROL_X: f64 = 116.0;
@@ -675,7 +692,7 @@ mod settings {
     const OPACITY_TOP: f64 = 160.0;
     const TOGGLE_TOP: f64 = 204.0;
     const TOGGLE_STEP: f64 = 28.0;
-    const FOOTER_TOP: f64 = 358.0;
+    const FOOTER_TOP: f64 = 386.0;
     /// The tray/menu click that opened the panel must finish before outside
     /// clicks can close it again.
     const MONITOR_ARM_DELAY: Duration = Duration::from_millis(300);
@@ -691,6 +708,7 @@ mod settings {
         notification_sound: bool,
         gaze: bool,
         click_through: bool,
+        hide_tray_icon: bool,
         chat_open: bool,
     }
 
@@ -705,6 +723,7 @@ mod settings {
         notification_sound: Retained<NSButton>,
         gaze: Retained<NSButton>,
         click_through: Retained<NSButton>,
+        hide_tray_icon: Retained<NSButton>,
         chat_open: Retained<NSButton>,
         /// NSControl does not retain its target, so the panel keeps it alive.
         path_chooser: Retained<PathChooser>,
@@ -815,7 +834,8 @@ mod settings {
                 ("通知音效", TOGGLE_TOP + TOGGLE_STEP),
                 ("凝视", TOGGLE_TOP + TOGGLE_STEP * 2.0),
                 ("点击穿透", TOGGLE_TOP + TOGGLE_STEP * 3.0),
-                ("聊天气泡展开", TOGGLE_TOP + TOGGLE_STEP * 4.0),
+                ("隐藏托盘图标", TOGGLE_TOP + TOGGLE_STEP * 4.0),
+                ("聊天气泡展开", TOGGLE_TOP + TOGGLE_STEP * 5.0),
             ];
             let mut buttons = Vec::with_capacity(toggles.len());
             for (title, top) in toggles {
@@ -829,8 +849,9 @@ mod settings {
                 notification_sound,
                 gaze,
                 click_through,
+                hide_tray_icon,
                 chat_open,
-            ] = <[Retained<NSButton>; 5]>::try_from(buttons).ok()?;
+            ] = <[Retained<NSButton>; 6]>::try_from(buttons).ok()?;
 
             let footer = label(mtm, "修改会立即生效并保存", 11.0);
             footer.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -848,6 +869,7 @@ mod settings {
                 notification_sound,
                 gaze,
                 click_through,
+                hide_tray_icon,
                 chat_open,
                 path_chooser,
                 dir_events,
@@ -945,6 +967,9 @@ mod settings {
             set_checked(&self.notification_sound, config.notification_sound);
             set_checked(&self.gaze, config.gaze);
             set_checked(&self.click_through, config.click_through);
+            set_checked(&self.hide_tray_icon, config.hide_tray_icon);
+            // The toggle has no effect while the pet ignores the mouse.
+            self.hide_tray_icon.setEnabled(!config.click_through);
             set_checked(&self.chat_open, config.chat_open);
             self.last = self.read();
         }
@@ -958,6 +983,7 @@ mod settings {
                 notification_sound: is_checked(&self.notification_sound),
                 gaze: is_checked(&self.gaze),
                 click_through: is_checked(&self.click_through),
+                hide_tray_icon: is_checked(&self.hide_tray_icon),
                 chat_open: is_checked(&self.chat_open),
             }
         }
@@ -1123,6 +1149,9 @@ mod settings {
         if current.click_through != previous.click_through {
             actions.push(PanelAction::SetClickThrough(current.click_through));
         }
+        if current.hide_tray_icon != previous.hide_tray_icon {
+            actions.push(PanelAction::SetHideTrayIcon(current.hide_tray_icon));
+        }
         if current.chat_open != previous.chat_open {
             actions.push(PanelAction::SetChatOpen(current.chat_open));
         }
@@ -1191,6 +1220,7 @@ mod settings {
                 notification_sound: true,
                 gaze: true,
                 click_through: false,
+                hide_tray_icon: false,
                 chat_open: true,
             }
         }
@@ -1240,6 +1270,13 @@ mod settings {
             assert_eq!(
                 diff(&base(), &next),
                 vec![PanelAction::SetClickThrough(true)]
+            );
+
+            let mut next = base();
+            next.hide_tray_icon = true;
+            assert_eq!(
+                diff(&base(), &next),
+                vec![PanelAction::SetHideTrayIcon(true)]
             );
 
             let mut next = base();
