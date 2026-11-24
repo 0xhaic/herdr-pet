@@ -10,8 +10,13 @@ use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::window::Window;
 
-/// 22 pt @2x monochrome square plate with a cat-shaped cut-out; drawn as a macOS template image.
+/// macOS: 22 pt @2x monochrome square plate with a cat-shaped cut-out, drawn
+/// as a template image. Windows: a colored icon stays visible on both light
+/// and dark taskbars.
+#[cfg(target_os = "macos")]
 const ICON_BYTES: &[u8] = include_bytes!("../assets/tray-icon.png");
+#[cfg(not(target_os = "macos"))]
+const ICON_BYTES: &[u8] = include_bytes!("../assets/app-icon.png");
 const ID_SHOW: &str = "show";
 const ID_SETTINGS: &str = "settings";
 const ID_ABOUT: &str = "about";
@@ -107,6 +112,9 @@ fn decode_icon() -> Result<Icon> {
     let image = image::load_from_memory(ICON_BYTES)
         .context("decoding the tray icon")?
         .to_rgba8();
+    // Windows scales tray icons with the taskbar; 32 px covers 200% DPI.
+    #[cfg(not(target_os = "macos"))]
+    let image = image::imageops::resize(&image, 32, 32, image::imageops::FilterType::Lanczos3);
     let (width, height) = image.dimensions();
     Icon::from_rgba(image.into_raw(), width, height).context("invalid tray icon pixels")
 }

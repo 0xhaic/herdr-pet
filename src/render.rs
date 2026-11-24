@@ -81,7 +81,19 @@ pub struct Renderer {
 impl Renderer {
     pub async fn new(window: Arc<Window>, atlas: &Atlas) -> Result<Self> {
         let size = window_size(&window);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        // A DXGI swapchain made straight from the HWND only offers Opaque
+        // composite alpha. DirectComposition adds the premultiplied-alpha path
+        // the pet needs, at the cost of RenderDoc support. DX12 is forced so
+        // the backend option cannot be bypassed by a Vulkan adapter.
+        #[cfg(target_os = "windows")]
+        {
+            descriptor.backends = wgpu::Backends::DX12;
+            descriptor.backend_options.dx12.presentation_system =
+                wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        }
+        let instance = wgpu::Instance::new(descriptor);
         let surface = instance
             .create_surface(window)
             .context("creating wgpu surface")?;
@@ -115,7 +127,18 @@ impl Renderer {
         // wgpu 30's Metal backend only makes CAMetalLayer non-opaque for
         // PostMultiplied; PreMultiplied leaves the layer opaque (black
         // window). The layer is still composited as premultiplied alpha,
-        // which is what the shader writes.
+        // which is what the shader writes. DirectComposition expects
+        // PreMultiplied instead.
+        #[cfg(target_os = "windows")]
+        let alpha_mode = if capabilities
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else {
+            wgpu::CompositeAlphaMode::Auto
+        };
+        #[cfg(not(target_os = "windows"))]
         let alpha_mode = if capabilities
             .alpha_modes
             .contains(&wgpu::CompositeAlphaMode::PostMultiplied)

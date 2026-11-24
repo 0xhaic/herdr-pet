@@ -90,6 +90,40 @@ impl Atlas {
         [u0, v0, u1, v1]
     }
 
+    /// Horizontal runs of pixels at or above `threshold` in one cell, as
+    /// `(cell_y, x_start, x_end_exclusive)`. Windows turns these into the
+    /// window hit region; clicks outside it pass through to other windows.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn alpha_spans(&self, row: u32, col: u32, threshold: u8) -> Vec<(u32, u32, u32)> {
+        let mut spans = Vec::new();
+        if row >= self.rows() || col >= ATLAS_COLS {
+            return spans;
+        }
+        for cell_y in 0..CELL_H {
+            let mut run_start = None;
+            for cell_x in 0..CELL_W {
+                let index = (((row * CELL_H + cell_y) * self.width + col * CELL_W + cell_x) * 4 + 3)
+                    as usize;
+                let opaque = self
+                    .rgba
+                    .get(index)
+                    .is_some_and(|alpha| *alpha >= threshold);
+                match (opaque, run_start) {
+                    (true, None) => run_start = Some(cell_x),
+                    (false, Some(start)) => {
+                        spans.push((cell_y, start, cell_x));
+                        run_start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(start) = run_start {
+                spans.push((cell_y, start, CELL_W));
+            }
+        }
+        spans
+    }
+
     /// Alpha of the pixel under `(x, y)` in a view that displays the whole
     /// cell. Used for click-through hit testing.
     pub fn alpha_at_view(
@@ -903,6 +937,30 @@ mod tests {
         assert_eq!(pet.atlas.rows(), 9);
         assert!(!pet.atlas.gaze_enabled());
         assert_eq!(pet.atlas.rgba.len(), (1536 * 1872 * 4) as usize);
+    }
+
+    #[test]
+    fn alpha_spans_cover_opaque_runs_and_skip_faint_pixels() {
+        let mut rgba = vec![0u8; (CELL_W * CELL_H * 4) as usize];
+        let mut set = |x: u32, y: u32, alpha: u8| {
+            let index = ((y * CELL_W + x) * 4 + 3) as usize;
+            rgba[index] = alpha;
+        };
+        set(2, 1, 100);
+        set(3, 1, 200);
+        set(0, 2, 255);
+        set(1, 2, 15);
+        let atlas = Atlas {
+            width: CELL_W,
+            height: CELL_H,
+            rgba,
+        };
+        assert_eq!(
+            atlas.alpha_spans(0, 0, 16),
+            [(1, 2, 4), (2, 0, 1)],
+            "opaque runs are reported and sub-threshold pixels are dropped"
+        );
+        assert!(atlas.alpha_spans(9, 0, 16).is_empty());
     }
 
     #[test]

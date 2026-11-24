@@ -1,0 +1,425 @@
+# herdr-pet Windows 适配方案
+
+> 状态：M0 已实现，待 Windows 实机验收。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
+>
+> M0 实施记录（2026-11-25）：Windows 目标通过 `cargo check` 与
+> `cargo clippy --all-targets -- -D warnings` 静态检查，macOS 本机 137 项测试通过；
+> 尚未在 Windows 实机构建或运行。M0 交付：透明窗口与 DirectComposition 渲染、
+> 全局指针拖拽、基于窗口 region 的逐像素点击穿透、彩色托盘图标、`hc connect`
+> 传输与重连、Windows CI 构建 job。气泡、设置面板、通知、Herdr.app 集成按
+> M1–M3 留待后续。
+>
+> M0 已知限制：托盘“设置…/关于”暂无响应（M3）；Windows 通知尚未接入，状态变化会
+> 尝试 macOS 的 `osascript`/`afplay` 并记录失败（M2）；无宠物目录或 Codex Windows
+> 路径不一致时进程报错退出，需从终端运行或传 `--pet <path>`（M1 确认路径）；
+> 整窗点击穿透开关待 M1 实机验证。
+
+## 1. 已确认决策
+
+| 决策点 | 选择 |
+| --- | --- |
+| 发布形态 | 单个便携 exe，不使用安装器，不额外提供 zip |
+| 运行验证 | 有 Windows 实机；每个里程碑产出 exe 后由用户手动验收 |
+| 气泡视觉 | 首版接受半透明填充，不实现真实背景模糊 |
+| 平台基线 | Windows 10 1809+ / Windows 11，x64；ARM64、Linux 不在首版范围 |
+| 验证方式 | 通过 Windows 本机构建或 CI 产出 exe，用户在实机执行本文第 7 节的验收清单 |
+
+目标是功能对齐当前 macOS 版本；平台差异（无背景模糊、无虚拟桌面置顶、通知能力受限）在 README 中明确标注，不静默缺失。
+
+## 2. 关键发现与硬约束
+
+### 2.1 现有平台隔离
+
+- `main.rs`、`status.rs`、`pet.rs`、`chat.rs`、`config.rs` 基本与平台无关。
+- `src/platform/mod.rs:29` 已为 `not(macos)` 提供全部 stub；新增 `src/platform/windows.rs` 后，主逻辑不需要分叉。
+- 真正需要改写的平台代码集中在 `src/platform/macos.rs`（1417 行 AppKit）。
+- 唯一 Unix 硬依赖是 `src/herdr.rs:14` 的 `tokio::net::UnixStream`，以及 `READ_TIMEOUT` / socket 发现逻辑。
+
+### 2.2 wgpu 透明窗口
+
+wgpu 30 的 DX12 后端对普通 HWND surface 只声明 `CompositeAlphaMode::Opaque`
+（`wgpu-hal-30.0.2/src/dx12/adapter.rs:1365`）。因此：
+
+- 普通 swapchain + `with_transparent(true)` 在 Windows 上会得到不透明黑底；
+- 必须使用 DirectComposition visual：`Dx12BackendOptions.presentation_system = wgpu::Dx12SwapchainKind::DxgiFromVisual`；
+- 该路径支持 `PreMultiplied` alpha，但不被 RenderDoc 支持（仅开发工具限制）。
+
+示意：
+
+```rust
+let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+#[cfg(windows)]
+{
+    descriptor.backend_options.dx12.presentation_system =
+        wgpu::Dx12SwapchainKind::DxgiFromVisual;
+}
+let instance = wgpu::Instance::new(descriptor);
+```
+
+这是整个 Windows 适配的 go/no-go 点，必须在 M0 用真实 Windows 机器验证。
+
+### 2.3 herdr-core 传输
+
+`hc connect` 的 stdio JSON-RPC 已在本机实测可用：
+
+- 发送 `hello` 与 `events.subscribe` 后，能从 stdout 收到响应与终端快照；
+- Windows 上 herdr-core 的安装位置与 IPC 形式未在本机验证，首版不依赖 named pipe / `HC_TERMINAL_SOCKET`；
+- 通过 `hc connect --session <session>` 子进程连接，断线后杀进程重连即可。
+
+静态检查基线（2026-11-25）：在 macOS 上安装 `x86_64-pc-windows-msvc` 后执行
+`cargo check --target x86_64-pc-windows-msvc`，当前仅 `src/herdr.rs` 的
+`tokio::net::UnixStream` / `unix::OwnedWriteHalf` 共 4 处报错；其余主程序代码与
+wgpu、winit、tray-icon、muda 等依赖在 Windows 目标下均可编译通过。说明移植前的
+Windows 编译阻塞点只有 herdr 传输层，没有额外的依赖或条件编译问题。
+
+### 2.4 Windows API 支持
+
+- `winit 0.30`：`with_skip_taskbar`、`with_no_redirection_bitmap`、`set_cursor_hittest` 均可用；后者在 Windows 上添加 `WS_EX_TRANSPARENT | WS_EX_LAYERED`（`winit window_state.rs:300`）。
+- `tray-icon 0.26`：Windows `set_visible` 已实现；`muda 0.21`：支持 `show_context_menu_for_hwnd`。
+- `winit` 在 Windows 上设置 Per-Monitor V2 DPI awareness，`scale_factor()`、物理坐标与 `set_outer_position` 可直接使用。
+
+## 3. 总体架构
+
+```text
+herdr-core（Windows）
+        │  hc connect --session <session>（stdio JSON-RPC）
+        ▼
+  herdr.rs（后台 tokio 任务，跨平台传输抽象）
+        │  Snapshot / Event / Disconnected
+        ▼
+  status.rs + pet.rs + chat.rs（现有纯逻辑，不改）
+        ▼
+  main.rs（winit 主线程，60 Hz tick）
+        ├── render.rs：DxgiFromVisual 透明 surface + 宠物 quad + 气泡纹理 quad
+        ├── platform/windows.rs
+        │     ├── 鼠标/拖拽/点击穿透/工作区
+        │     ├── Direct2D + DirectWrite 气泡位图
+        │     ├── Win32 设置面板
+        │     ├── 托盘/通知/关于/右键菜单
+        │     └── Herdr 前台判断与路径发现
+        ├── notify.rs：Toast + PlaySoundW
+        └── tray.rs：彩色托盘图标（Windows）
+```
+
+Windows 上不引入第二套 GUI 框架：气泡用 Direct2D/DirectWrite 栅格化后交给 wgpu 合成，设置面板用原生 Win32 控件。
+
+## 4. 模块方案
+
+### 4.1 平台层拆分
+
+新增 `src/platform/windows.rs`，在 `src/platform/mod.rs` 中按 `cfg(target_os = "windows")` 导出，与 macOS 保持相同接口。
+
+`platform/mod.rs` 现有的 `#[cfg(not(target_os = "macos"))]` stub 必须改成 `#[cfg(not(any(target_os = "macos", target_os = "windows")))]`，否则 Windows 会同时编译 stub 和真实实现；macOS/Windows 各自只编译自己的模块。
+
+| macOS | Windows |
+| --- | --- |
+| `mouse_position` | `GetCursorPos`（物理像素、左上角原点，无需主屏换算） |
+| `left_button_down` | `GetAsyncKeyState(VK_LBUTTON)` |
+| `menu_bar_height` / 工作区 | 新增 `work_area`：`GetMonitorInfoW().rcWork`；任务栏在任意边都不进入 |
+| `herdr_app_frontmost` | `GetForegroundWindow` + 进程映像路径/名称比较 |
+| `herdr_app_path` | PATH、`%LOCALAPPDATA%\Programs\...`、App Paths 注册表 |
+| `send_notification` | WinRT Toast（AUMID） |
+| `show_about` | TaskDialog（回落 MessageBox） |
+| `show_context_menu` | `muda::ContextMenu::show_context_menu_for_hwnd` |
+| `float_on_all_spaces` | no-op（Windows 无等价 Spaces） |
+| `allow_window_above_menu_bar` | no-op |
+| `ChatOverlay` | Direct2D 位图 + wgpu 纹理 |
+| `SettingsPanel` | Win32 无模式窗口 + 标准控件 |
+
+为减少重复：
+
+- 把设置面板的 `UiState` / `diff` 从 `platform/macos.rs` 提取到 `platform/mod.rs`，两端共用；
+- 在 `platform/mod.rs` 增加 `work_area(monitor) -> Option<Rect>`：Windows 返回 `rcWork`，macOS 返回 `None`，`main.rs` 的 `screen_area` 保持 macOS 原行为；
+- 增加 `platform::set_cursor_hittest(window, bool)` 薄封装，Windows 可在此替换实现，macOS 继续调用 winit。
+
+### 4.2 窗口、渲染与输入
+
+`main.rs` 的窗口属性：
+
+- Windows 加 `with_skip_taskbar(true)`；
+- 候选 `with_no_redirection_bitmap(true)`，配合 DirectComposition；该选项与点击穿透的兼容性在 M0 验证；
+- 创建后追加 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`；`with_skip_taskbar` 只通过 ITaskbarList 移除任务栏按钮，Alt+Tab 隐藏仍需 `WS_EX_TOOLWINDOW`；点击宠物不抢焦点，避免干扰 Herdr 前台判断；
+- `WindowLevel::AlwaysOnTop` 已映射 `HWND_TOPMOST`，暂不额外重设。
+
+`render.rs`：
+
+- Windows 实例启用 `DxgiFromVisual`；
+- alpha mode：macOS 保持 `PostMultiplied`，Windows 使用 `PreMultiplied`；
+- 保留现有 atlas 预乘 sRGB 方案，Windows 上需在浅色/深色壁纸与 100%/150%/200% 缩放下检查边缘；
+- 新增 overlay 纹理与第二个 pipeline：预乘 alpha 混合（`ONE, ONE_MINUS_SRC_ALPHA`），在宠物 quad 之后绘制气泡位图；
+- 纹理上传处理 `COPY_BYTES_PER_ROW_ALIGNMENT` 行对齐。
+
+点击穿透（M0 实现）：
+
+- 不复用 winit 的 `set_cursor_hittest`：它在 Windows 上给窗口加 `WS_EX_LAYERED`，与 DirectComposition 视觉冲突；仅切换 `WS_EX_TRANSPARENT` 也不够，ReactOS/Wine/GLFW/Electron 的跨进程命中穿透都要求 `WS_EX_LAYERED | WS_EX_TRANSPARENT` 同时存在；
+- 改用操作系统窗口 region：按当前宠物帧的 atlas alpha（阈值 16）生成水平 run，经 `ExtCreateRegion` + `SetWindowRgn` 设置窗口区域；区域外的透明像素在 win32k 命中测试中被排除，实现跨进程点击穿透。这与 Chromium 对其 Direct3D 透明窗口使用的方案一致；
+- region 只在帧、宠物矩形或缩放变化时重建（`main.rs` 的 `hit_region_key`）。窗口区域同时裁剪绘制，alpha < 16 的不可见边缘会被裁掉；阈值与点击判定一致，M0 实机确认视觉无差异；
+- `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` 通过窗口子类的 `WM_STYLECHANGING` 保持，避免被 winit 的整体样式重写抹掉；
+- 整窗“点击穿透”开关仍使用 `WS_EX_TRANSPARENT`，其跨进程效果需在 M1 实机验证；若无效，按第 8 节改用 layered 兜底；
+- 宠物透明像素判定继续使用 atlas alpha（阈值 16）：macOS 使用 `alpha_at_view`，Windows 使用 `alpha_spans`。
+
+屏幕坐标：
+
+- 拖拽与凝视继续使用全局指针 + `set_outer_position`；
+- 屏幕可用区域改用 `rcWork`，宠物不进入任务栏（任务栏在上/下/左/右均适用）；
+- 多显示器负坐标、混合 DPI 由 `GetCursorPos` + winit 物理坐标覆盖；
+- `config.position` 继续保存宠物左上角物理像素。
+
+### 4.3 herdr-core 传输
+
+把 `src/herdr.rs` 的传输抽象为枚举：
+
+```rust
+enum Transport {
+    Unix(PathBuf),                  // 现有 UnixStream 路径
+    HcConnect { program: PathBuf, session: String }, // Windows
+}
+```
+
+- Unix：保留 `HC_TERMINAL_SOCKET`、`$XDG_STATE_HOME/herdr-core/<session>/<session>.sock` 发现顺序；
+- Windows：`tokio::process::Command` 启动 `hc connect --session <session>`，stdout/stdin 作为读写半端；
+- 子进程使用 `CREATE_NO_WINDOW` 和 `kill_on_drop(true)`；`missed`/超时/断线后杀掉子进程，沿用 2 秒重连；
+- `read_response` / `read_line` 泛化为 `AsyncRead + AsyncWrite`；
+- Windows 程序发现顺序：
+  1. PATH 中的 `hc.exe` / `herdr-core.exe`；
+  2. `%LOCALAPPDATA%\Programs\herdr-core\hc.exe`；
+  3. `%LOCALAPPDATA%\Programs\herdr-core\herdr-core.exe`；
+  4. 找不到时记录明确错误并重试，不退出主进程。
+- 平台专用变体与函数按 `cfg` 收口，避免 `clippy -D warnings` 因死代码失败；
+- `HC_SESSION` 继续作为 session 来源，默认 `default`。
+
+测试：
+
+- 现有 Unix socket 测试用 `#[cfg(unix)]` 收口，避免 Windows 编译失败；
+- 新增基于 `tokio::io::duplex` 的跨平台握手测试；
+- Windows 运行时由用户在实机验证（快照、事件、断线重连）。
+
+### 4.4 Herdr.app 集成
+
+`src/herdr_app.rs`：
+
+- `app_home()`：
+  - macOS 保持 `HERDR_APP_HOME` → `XDG_CONFIG_HOME/herdr-app` → `~/.config/herdr-app`；
+  - Windows 使用 `HERDR_APP_HOME` → `dirs::config_dir()/herdr-app`（预计 `%APPDATA%\herdr-app`，需实机确认）。
+- `focus_terminal`：
+  - 不再使用 `/usr/bin/open -b dev.herdr.app`；
+  - 直接启动找到的 `herdr-app.exe`，然后执行 `agent.focus` / `terminal.peek`；
+  - 子 agent 仍先 `terminal.peek`，失败回退 `agent.focus`；
+  - 子进程用 `CREATE_NO_WINDOW`，保留 25 × 200ms 重试。
+- 前台判断：
+  - `GetForegroundWindow` → `GetWindowThreadProcessId` → `QueryFullProcessImageNameW`；
+  - 与 Herdr 可执行文件路径比较，路径不可得时比较文件名 `Herdr.exe` / `herdr-app.exe`；
+  - 仍每 250ms 查询一次。
+- `view.json` 已读逻辑不变，只改 app home；
+- 找不到 Herdr 时按现有策略降级：图标隐藏、点击只尝试拉起，不影响宠物和气泡。
+
+### 4.5 聊天浮层
+
+Windows 首版不追求真实模糊，使用半透明填充：
+
+- 用 **Direct2D + DirectWrite** 把气泡、标题/副标题、状态图标、分页箭头、右下角按钮画进一张预乘 BGRA 位图；
+- 位图裁剪到实际可见区域（气泡 + 按钮），通过 `ChatOverlay::take_bitmap()` 交给 `Renderer` 上传为 wgpu 纹理；
+- macOS 的 `NSVisualEffectView` 保持不变，`take_bitmap()` 在 macOS 返回 `None`；
+- 点击命中继续由 `main.rs` 的矩形判定处理，不需要第二套输入窗口。
+
+细节：
+
+- 字体：`Microsoft YaHei UI`，缺失时回落 `Segoe UI`；DWrite 自动处理缺字回退；文字抗锯齿用灰度，避免透明背景上的 ClearType 彩边；
+- 主题：读取 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`，选择深/浅色玻璃、文字与描边；
+- `chat_opacity` 只作用于玻璃层与描边，文字和图标保持不透明；
+- Agent 图标：用 `resvg` 栅格化 Herdr 的 SVG，`tint` 时按主题改 RGB 并保留 alpha；文件缺失时隐藏图标并恢复文字宽度；
+- 状态图标：用矢量路径绘制月亮/手/对勾/叉/省略号，不依赖 `Segoe Fluent Icons` 码点；
+- 工作中的 spinner：在 `take_bitmap()` 内按时间节流重绘，不额外开定时器；
+- 气泡翻到下方、横移、收起、pager 出现/消失时重新栅格化；
+- 不支持真实背景模糊，README 标注为 Windows 首版差异。
+
+### 4.6 设置面板
+
+用原生 Win32 无模式窗口，不引入第二套 GUI 框架：
+
+- 控件：`COMBOBOX`（宠物）、静态文本（目录）、两个按钮、`TRACKBAR`（大小/不透明度）、6 个 `AUTOCHECKBOX`、底部说明；
+- 沿用 macOS 的轮询设计：每 tick 读取控件状态，与 `UiState` diff 后生成 `PanelAction`；程序化同步后更新 `last`，避免回环；
+- 字体 `Microsoft YaHei UI` 9pt，按 `GetDpiForWindow()` 缩放；处理 `WM_DPICHANGED`；
+- 目录选择：`IFileOpenDialog` + `FOS_PICKFOLDERS`，`CoInitializeEx` 容忍已初始化；
+- 关闭按钮：`WM_CLOSE` 只隐藏窗口，保留实例；
+- 点击面板外关闭：沿用 300ms 延迟，轮询左键按下沿 + 面板矩形判断，存在模态对话框时豁免；
+- `click_through` 开启时禁用「隐藏托盘图标」勾选框，与 macOS 一致。
+
+### 4.7 托盘、通知与关于
+
+托盘：
+
+- `tray-icon` / `muda` 直接可用；
+- macOS 继续使用模板图 `assets/tray-icon.png`；
+- Windows 不使用黑色模板图（深色任务栏不可见），运行时把 `assets/app-icon.png` 缩放为 32×32 彩色图标；
+- 宠物右键菜单使用 `show_context_menu_for_hwnd`，位置由 muda 取指针位置；
+- `set_visible`、菜单事件轮询沿用现有逻辑。
+
+通知与声音：
+
+- Toast 用 `windows` crate 的 WinRT API，AUMID 固定为 `0xhaic.herdr-pet`；
+- 单 exe 没有安装器注册 AUMID，首版按以下顺序处理：
+  1. 设置进程 AUMID 后直接尝试 toast；
+  2. 若实机验证不显示，首次通知时在 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\herdr-pet.lnk` 创建带 AUMID 的快捷方式（best-effort）；
+  3. 仍失败则只播放提示音并记录日志，不弹阻塞对话框；
+  4. 如实机确认 toast 不可用，再补托盘气泡（`Shell_NotifyIcon` NIF_INFO）。
+- 声音：`PlaySoundW` 系统别名，blocked → `SystemHand`，done → `SystemAsterisk`；
+- `notify.rs` 的 osascript 回落改为平台函数，Windows 不再拼接 AppleScript；
+- `config.notifications` / `notification_sound` 语义保持不变。
+
+关于：
+
+- `TaskDialog` 显示版本号（`CARGO_PKG_VERSION`）和仓库超链接；不可用时回落 `MessageBoxW`；
+- 模态期间阻塞事件循环，与 macOS 现行为一致。
+
+### 4.8 路径与配置
+
+- `config.rs`：
+  - macOS 保持 `$XDG_CONFIG_HOME/herdr-pet/config.json`（默认 `~/.config`）；
+  - Windows 使用 `%APPDATA%\herdr-pet\config.json`。
+- 宠物目录：`CODEX_HOME` → `dirs::home_dir()/.codex/pets`；Windows 下即 `%USERPROFILE%\.codex\pets`，需在实机确认 Codex Windows 版本路径。
+- Herdr 图标目录：随 `herdr_app::app_home()` 一起切换。
+- README 增加 Windows 路径表、构建命令、平台差异与已知限制。
+
+### 4.9 构建与发布
+
+- `Cargo.toml` 新增 Windows 目标依赖：`windows = "0.62"`（与 wgpu 已锁定的 0.62.2 共用，不引入第二个 windows 版本；D2D/DWrite/WinRT/Shell 相关 features 按需裁剪）与 `resvg`（实施时锁定版本）；
+- `tokio` 增加 `process` feature；
+- 提交 `assets/app-icon.ico`（16–256 多尺寸）；`build.rs` 按 `CARGO_CFG_TARGET_OS` 分支：仅 Windows 目标编译资源，设置 exe 图标、版本信息与 manifest（PerMonitorV2、asInvoker、common-controls v6），macOS 构建直接返回；
+- 里程碑构建保留控制台子系统，便于用户看到 `eprintln!` 日志；正式发布使用 `windows_subsystem = "windows"`。若需要发布版可观测性，再加最小日志文件；
+- CI 新增 `windows-latest` job：
+  - `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
+  - `cargo build --release`，产出 `target/release/herdr-pet.exe`；
+  - 上传 artifact，命名 `herdr-pet-<version>-windows-x64.exe`；
+- 发布建议把现有 macOS workflow 改为「macOS + Windows 两个 package job + 一个 publish job」，避免两个 workflow 同时创建/更新 GitHub Release；tag 版本校验、release notes 校验和 `chore: 发布 v<version>` 流程保持不变；
+- macOS 本机可用 `cargo check --target x86_64-pc-windows-msvc` 做静态编译检查（需 `rustup target add x86_64-pc-windows-msvc`）；它只验证类型与条件编译，不执行 Windows 资源编译、链接和运行，不能替代 Windows 构建与实机验证。
+
+## 5. 代码改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/platform/mod.rs` | 新增 Windows 模块导出；把 `not(macos)` stub 收口为 `not(any(macos, windows))`；共享 `UiState`/`diff`；`work_area`；`set_cursor_hittest` 封装；overlay 位图类型 |
+| `src/platform/windows.rs`（新增） | 鼠标/工作区/点击穿透/Herdr 路径/D2D 气泡/Win32 设置面板/托盘/通知/关于 |
+| `src/main.rs` | Windows 窗口属性；工作区；overlay 位图上传；业务逻辑不变 |
+| `src/render.rs` | `DxgiFromVisual`；Windows alpha mode；overlay 纹理与 pipeline |
+| `src/herdr.rs` | 传输抽象；`hc connect` 子进程；泛化读写；测试 |
+| `src/herdr_app.rs` | Windows app home / 路径发现 / 前台判断 / 拉起方式 |
+| `src/config.rs` | Windows 配置路径 |
+| `src/notify.rs` | 平台化通知与提示音 |
+| `src/tray.rs` | Windows 彩色托盘图标 |
+| `build.rs` / `assets/app-icon.ico` | exe 图标、manifest、版本信息 |
+| `.github/workflows/*` | Windows 构建、exe artifact、同一 Release 发布 |
+| `README.md` / `docs/design.md` | 平台说明、构建、路径、差异与限制 |
+
+## 6. 里程碑
+
+### M0 技术验证版 + herdr 数据链路
+
+内容：
+
+- `platform/windows.rs` 骨架；
+- `DxgiFromVisual` 透明窗口 + 宠物 quad；
+- `GetCursorPos` / `GetAsyncKeyState` 拖拽；
+- 逐像素点击穿透；
+- 彩色托盘图标；
+- Windows 传输完整实现：`hc connect`、`hello` / `events.subscribe`、快照、事件、断线重连；
+- 状态表接入现有 `Animator`，驱动 working / blocked / done / error 动画（done 的已读细分在 M2 接入 `view.json`）；
+- 最小 Windows CI 构建 job（供里程碑验证；Release 发布在 M4 接入），或在 Windows 本机用 `cargo build --release` 产出验证 exe；
+- 不实现气泡和设置面板。
+
+→ 验证：通过 Windows 本机构建或 CI 产出 exe，用户在 Windows 实机确认：透明无黑底、始终置顶、无任务栏条目、宠物可拖动、透明像素点击穿透；真实 herdr-core 的 working / blocked / done / error 动画正确，断开/重启 core 后能重连。若透明或点击穿透失败，暂停后续移植，按第 8 节兜底方案调整。
+
+### M1 桌面行为
+
+内容：
+
+- 多显示器、混合 DPI、任务栏工作区避让；
+- 位置持久化；
+- 整窗点击穿透开关；
+- 托盘完整菜单、宠物右键菜单、隐藏托盘图标；
+- 配置路径切换。
+
+→ 验证：用户执行验收清单第 1–6 项；宠物跨屏拖动不跳变、不进入任务栏；重启后位置保持。
+
+### M2 Herdr.app 与提醒
+
+内容：
+
+- Herdr 前台判断；
+- 点击跳转与子 agent `terminal.peek`；
+- `view.json` 已读状态；
+- Toast / 提示音与开关。
+
+→ 验证：用户执行验收清单第 9–11 项；用真实 herdr-core/Herdr 确认提醒、前台隐藏、点击跳转；已读 done 在查看后从 review 回坐姿。
+
+### M3 气泡与设置面板
+
+内容：
+
+- Direct2D 气泡位图 + wgpu overlay；
+- 文案、Agent 图标、状态图标、spinner、分页箭头；
+- 深浅主题、`chat_opacity`、边缘翻转/横移；
+- Win32 设置面板、目录选择、失焦关闭；
+- 关于对话框。
+
+→ 验证：用户执行验收清单第 7–8 项；确认无真实模糊但半透明填充可读、可点击、可收起。
+
+### M4 发布
+
+内容：
+
+- 正式 `windows_subsystem = "windows"`；
+- icon/manifest；
+- Windows CI job + 同一 GitHub Release 发布 exe；
+- README、`docs/design.md`、release notes 更新；
+- SmartScreen 提示。
+
+→ 验证：用户执行验收清单第 12 项；推送 tag 后 CI 校验版本与 `docs/release-notes/v<version>.md`，Release 同时包含 dmg 与 exe；用户在干净 Windows 机器上直接运行单 exe 完成验收。
+
+## 7. Windows 手动验收清单
+
+每个里程碑至少覆盖相关项：
+
+1. 浅色/深色壁纸、100%/150%/200% 缩放下透明边缘无黑底、白边或闪烁。
+2. 始终置顶；任务栏无图标；Alt+Tab 无条目；点击宠物不抢焦点。
+3. 拖动宠物跟手；跨相邻屏幕无跳变；不进入上/下/左/右任务栏。
+4. 宠物位置重启后保持；气泡翻转/收起不移动宠物。
+5. 透明像素点击穿透；宠物本体可点击/拖动；整窗点击穿透开关生效。
+6. 托盘显示/隐藏、设置、关于、退出；隐藏托盘图标后宠物右键菜单可用。
+7. 设置面板：宠物列表、目录选择、大小、不透明度、六个开关；修改立即生效并持久化；点击面板外关闭。
+8. 气泡：两行文案、Agent 图标、状态图标、spinner、左右箭头、收起/展开、靠近屏幕边缘翻转/横移。
+9. 通知与提示音；`notifications` / `notification_sound` 开关分别生效。
+10. Herdr 在前台时聊天 UI 隐藏，切走后恢复；点击气泡/宠物拉起 Herdr 并跳转；子 agent 使用 peek。
+11. herdr-core 未启动、运行中重启、断线场景；宠物保留最后状态并自动重连。
+12. 单 exe 在干净机器运行；配置写入 `%APPDATA%\herdr-pet\config.json`；SmartScreen 提示可绕过。
+
+## 8. 风险与应对
+
+| 风险 | 影响 | 应对 |
+| --- | --- | --- |
+| DirectComposition 透明与点击穿透冲突 | 无法实现逐像素穿透或透明失效 | M0 先验证；兜底改为 `WS_EX_LAYERED` + `UpdateLayeredWindow` 渲染宠物与气泡，放弃 Windows 的 wgpu pet 路径 |
+| `with_no_redirection_bitmap` 与 `set_cursor_hittest` 不兼容 | 点击穿透异常 | 不改用 winit 的 `set_cursor_hittest`，按 4.2 使用窗口 region 命中掩码 |
+| 单 exe 的 Toast 不显示 | 完成/阻塞提醒缺失 | 先实测；必要时首次运行创建带 AUMID 的 Start Menu 快捷方式；再不行补托盘气泡 |
+| Herdr Windows 安装路径/CLI 名称不一致 | 前台判断或跳转失败 | PATH + `%LOCALAPPDATA%` + 注册表多路查找；找不到时降级，不影响宠物 |
+| 无真实背景模糊 | 视觉与 macOS 不一致 | 首版接受半透明填充，README 标注 |
+| 虚拟桌面/独占全屏 | 切桌面后宠物不可见 | Windows 无等价 Spaces API，写入已知限制 |
+| 混合 DPI 下坐标偏差 | 宠物位置/凝视偏差 | 统一使用物理坐标；实机多缩放回归 |
+| 未签名 exe | SmartScreen 拦截 | release notes 与 README 给出“更多信息 → 仍要运行”；后续可选代码签名 |
+| RenderDoc 不支持 DirectComposition | 调试工具受限 | 开发期可用日志/截图，发布不影响 |
+
+## 9. 发布方案
+
+- 产物：`herdr-pet-<version>-windows-x64.exe`，单文件、无安装器、无 zip；
+- 与 macOS dmg 发布到同一个 GitHub Release；
+- `docs/release-notes/v<version>.md` 必须新增 Windows 分节，保留既有 DMG 签名提示，并补充 SmartScreen 提示；
+- 版本号同步 `Cargo.toml`、`Cargo.lock` 与 README 中的 tag 示例，提交 `chore: 发布 v<version>` 后推送同名 tag；
+- 首版不签名；若后续提供证书，再在 CI 中增加签名步骤。
+
+## 10. 下一步
+
+1. 实施 M0，先交付可运行 exe；
+2. 用户在 Windows 实机验证透明、置顶、拖拽、点击穿透、`hc connect`；
+3. M0 通过后按 M1 → M2 → M3 推进，每个里程碑交付 exe 供手动验收；
+4. 最后完成 M4 发布与文档更新。
+
+实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。

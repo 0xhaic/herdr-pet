@@ -237,9 +237,13 @@ struct Drag {
     scale: f64,
 }
 
-/// Usable area of `monitor`: the screen with its top edge below the menu bar.
-/// The pet is clamped to it; the bubble is placed inside it where possible.
+/// Usable area of `monitor`: the screen with its top edge below the menu bar,
+/// or the platform-reported work area (Windows excludes the taskbar). The pet
+/// is clamped to it; the bubble is placed inside it where possible.
 fn screen_area(monitor: &MonitorHandle) -> Rect {
+    if let Some(area) = platform::work_area(monitor) {
+        return area;
+    }
     let origin = monitor.position();
     let size = monitor.size();
     let top = f64::from(origin.y) + platform::menu_bar_height(monitor);
@@ -482,6 +486,30 @@ struct WindowSnapshot {
     scale: f64,
 }
 
+/// Inputs the Windows hit region was last built from. Rebuilding scans the
+/// atlas cell, so it only happens when the frame, pet rect or scale changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HitRegionKey {
+    frame: Frame,
+    scale: u64,
+    pet: (u64, u64, u64, u64),
+}
+
+impl HitRegionKey {
+    fn new(frame: Frame, pet: Rect, scale: f64) -> Self {
+        Self {
+            frame,
+            scale: scale.to_bits(),
+            pet: (
+                pet.x.to_bits(),
+                pet.y.to_bits(),
+                pet.w.to_bits(),
+                pet.h.to_bits(),
+            ),
+        }
+    }
+}
+
 impl WindowSnapshot {
     fn new(window: &Window) -> Option<Self> {
         Some(Self {
@@ -556,6 +584,8 @@ struct App {
     /// Window size, scale, and layout the native views were last fitted to.
     overlay_key: Option<(u32, u32, u64, ChatLayout, bool)>,
     last_chat_text: Option<ChatText>,
+    /// Frame, pet rect and scale the Windows hit region was last built from.
+    hit_region_key: Option<HitRegionKey>,
 }
 
 impl App {
@@ -610,6 +640,7 @@ impl App {
             overlay: None,
             overlay_key: None,
             last_chat_text: None,
+            hit_region_key: None,
         }
     }
 
@@ -669,7 +700,7 @@ impl App {
         let Some(window) = &self.window else {
             return;
         };
-        let _ = window.set_cursor_hittest(hittest);
+        platform::set_cursor_hittest(window, hittest);
         self.cursor_hittest = Some(hittest);
     }
 
@@ -994,6 +1025,23 @@ impl App {
         self.force_redraw = true;
     }
 
+    /// Rebuild the Windows click-through region when the visible pet frame or
+    /// its window rectangle changes. Other platforms hit-test per pixel in
+    /// `update_cursor`.
+    fn sync_hit_region(&mut self, frame: Frame) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let scale = window.scale_factor();
+        let pet = self.chat_layout.pet;
+        let key = HitRegionKey::new(frame, pet, scale);
+        if self.hit_region_key == Some(key) {
+            return;
+        }
+        platform::update_pet_region(window, &self.pet.atlas, frame, pet, scale, CLICK_ALPHA);
+        self.hit_region_key = Some(key);
+    }
+
     /// Clip-space quad for the pet sprite inside the taller window.
     fn pet_quad(&self) -> [f32; 4] {
         let Some(window) = &self.window else {
@@ -1199,6 +1247,7 @@ impl App {
         self.sync_chat();
         let frame = self.frame;
 
+        self.sync_hit_region(frame);
         self.update_cursor(local, frame);
         let uv = self.pet.atlas.cell_uv(frame.row, frame.col);
         if self.force_redraw || self.presented_uv != Some(uv) {
@@ -1366,7 +1415,11 @@ impl App {
         if enabled {
             self.dragging = None;
         }
-        self.set_cursor_hittest(!enabled);
+        if let Some(window) = &self.window {
+            platform::set_click_through(window, enabled);
+        }
+        // Let the next tick reapply the per-pixel state on macOS.
+        self.cursor_hittest = None;
         self.apply_tray_visibility();
         self.save_config();
         self.sync_panel();
@@ -1433,6 +1486,7 @@ impl App {
         }
         self.pending_uv = self.pet.atlas.cell_uv(0, 0);
         self.force_redraw = true;
+        self.hit_region_key = None;
         self.next_tick = Instant::now();
     }
 
@@ -1504,6 +1558,16 @@ impl ApplicationHandler for App {
             .with_transparent(true)
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop);
+        // DirectComposition presents the pet through the HWND visual, so the
+        // window itself needs no redirection bitmap. The taskbar button is
+        // skipped separately from the Alt+Tab entry (see `prepare_window`).
+        #[cfg(target_os = "windows")]
+        let attributes = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attributes
+                .with_skip_taskbar(true)
+                .with_no_redirection_bitmap(true)
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(error) => {
@@ -1512,9 +1576,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        if self.config.click_through {
-            let _ = window.set_cursor_hittest(false);
-        }
+        platform::prepare_window(&window);
+        platform::set_click_through(&window, self.config.click_through);
         if !platform::float_on_all_spaces(&window) {
             eprintln!("herdr-pet: cannot make the window float on all Spaces");
         }
@@ -1549,6 +1612,7 @@ impl ApplicationHandler for App {
         self.sync_bubble_placement();
         self.sync_overlay();
         self.sync_chat();
+        self.sync_hit_region(self.frame);
         // Start hidden until the first snapshot says an agent is active.
         self.apply_chat_visibility();
         self.next_tick = Instant::now();
