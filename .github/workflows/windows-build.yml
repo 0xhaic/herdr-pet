@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+      # 功能分支在 Windows 上做里程碑验证，产出可下载的 exe。
+      - "feat/**"
 
 permissions:
   contents: read
