@@ -5,22 +5,38 @@
 //! monitor work area. The Direct2D chat overlay and the Win32 settings panel
 //! belong to later milestones; see `docs/windows-port.md`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Data::Xml::Dom::XmlDocument;
+use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+use windows::Win32::Foundation::{
+    COLORREF, CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, ExtCreateRegion, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetWindowRgn,
 };
+use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+    RegCreateKeyExW, RegSetValueExW,
+};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGED, WM_STYLECHANGING, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
+    LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGED, WM_STYLECHANGING,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 use winit::monitor::MonitorHandle;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -321,19 +337,207 @@ pub fn allow_window_above_menu_bar(_window: &Window) -> bool {
     true
 }
 
-/// Herdr frontmost detection arrives with the Herdr.app milestone (M2).
-pub fn herdr_app_frontmost() -> bool {
-    false
+/// Toast identity registered under `HKCU\Software\Classes\AppUserModelId`.
+/// Without it Windows silently drops toasts from a bare executable.
+const APP_ID: &str = "dev.herdr.pet";
+
+/// Register the notification identity before the first reminder, so the
+/// shell never drops one while it learns about the app.
+pub fn prepare_notifications() {
+    ensure_app_id();
 }
 
-/// Herdr executable discovery arrives with the Herdr.app milestone (M2).
+/// Show a Windows toast with the given text.
+pub fn send_notification(message: &str) -> bool {
+    ensure_app_id();
+    match show_toast(message) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("herdr-pet: cannot show a notification: {error}");
+            false
+        }
+    }
+}
+
+fn show_toast(message: &str) -> windows::core::Result<()> {
+    // SAFETY: a WinRT call needs an initialized apartment on this thread;
+    // RPC_E_CHANGED_MODE only means another mode already initialized it.
+    unsafe {
+        let _ = RoInitialize(RO_INIT_MULTITHREADED);
+    }
+    let document = XmlDocument::new()?;
+    document.LoadXml(&HSTRING::from(toast_xml(message)))?;
+    let toast = ToastNotification::CreateToastNotification(&document)?;
+    let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))?;
+    notifier.Show(&toast)
+}
+
+fn ensure_app_id() {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        if let Err(error) = register_app_id() {
+            eprintln!("herdr-pet: cannot register the notification app id: {error}");
+        }
+    });
+}
+
+fn register_app_id() -> windows::core::Result<()> {
+    const DISPLAY_NAME: &str = "herdr-pet";
+    let subkey = HSTRING::from(format!("Software\\Classes\\AppUserModelId\\{APP_ID}"));
+    let name = HSTRING::from("DisplayName");
+    // REG_SZ is UTF-16 with a terminating NUL.
+    let mut bytes = Vec::with_capacity((DISPLAY_NAME.encode_utf16().count() + 1) * 2);
+    for unit in DISPLAY_NAME.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    let mut key = HKEY(std::ptr::null_mut());
+    // SAFETY: the key is created under HKCU, written once, and closed.
+    unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            &subkey,
+            None,
+            PCWSTR::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            None,
+            &mut key,
+            None,
+        )
+        .ok()?;
+        let status = RegSetValueExW(key, &name, None, REG_SZ, Some(&bytes));
+        let _ = RegCloseKey(key);
+        status.ok()?;
+    }
+    Ok(())
+}
+
+/// Play the system sound associated with a blocked or finished agent.
+pub fn play_notification_sound(blocked: bool) {
+    let alias = if blocked {
+        windows::core::w!("SystemHand")
+    } else {
+        windows::core::w!("SystemAsterisk")
+    };
+    // SAFETY: SND_ASYNC hands the system alias to the sound player and
+    // returns immediately; no resources are owned here.
+    unsafe {
+        let _ = PlaySoundW(alias, None, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
+    }
+}
+
+fn toast_xml(message: &str) -> String {
+    format!(
+        concat!(
+            "<toast><visual><binding template=\"ToastGeneric\">",
+            "<text>herdr-pet</text><text>{}</text>",
+            "</binding></visual><audio silent=\"true\"/></toast>"
+        ),
+        xml_escape(message)
+    )
+}
+
+/// Escape text going into the toast XML; terminal titles may contain `&`,
+/// `<` or quotes.
+fn xml_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// Herdr executable found once per process: PATH first, then the default
+/// install under `%LOCALAPPDATA%\Programs`.
 pub fn herdr_app_path() -> Option<PathBuf> {
+    cached_app_path().map(Path::to_path_buf)
+}
+
+fn cached_app_path() -> Option<&'static Path> {
+    static APP_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    APP_PATH.get_or_init(discover_app_path).as_deref()
+}
+
+fn discover_app_path() -> Option<PathBuf> {
+    const NAMES: [&str; 2] = ["herdr-app.exe", "Herdr.exe"];
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for name in NAMES {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    let programs = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Programs");
+    for folder in ["herdr-app", "Herdr"] {
+        for name in NAMES {
+            let candidate = programs.join(folder).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
     None
 }
 
-/// WinRT Toast support arrives with the notification milestone (M2).
-pub fn send_notification(_message: &str) -> bool {
-    false
+/// Whether the foreground window belongs to Herdr. The process image is
+/// compared with the discovered executable and falls back to its file name,
+/// so a custom install still hides the chat UI.
+pub fn herdr_app_frontmost() -> bool {
+    // SAFETY: these calls only read the foreground window and process state.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        if GetWindowThreadProcessId(hwnd, Some(&mut pid)) == 0 || pid == 0 {
+            return false;
+        }
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut buffer = [0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let queried = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(process);
+        if queried.is_err() {
+            return false;
+        }
+        let image = String::from_utf16_lossy(&buffer[..size as usize]);
+        is_herdr_app_image(Path::new(&image))
+    }
+}
+
+fn is_herdr_app_image(image: &Path) -> bool {
+    if let Some(app) = cached_app_path()
+        && image
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&app.to_string_lossy())
+    {
+        return true;
+    }
+    image
+        .file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("herdr-app.exe") || name.eq_ignore_ascii_case("Herdr.exe")
+        })
 }
 
 /// The TaskDialog arrives with the settings milestone (M3).
@@ -402,5 +606,28 @@ impl SettingsPanel {
         _pets_dir: &Path,
         _custom_dir: bool,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_toast_text() {
+        let xml = toast_xml("a&b<c>d\"e'f");
+        assert!(xml.contains("a&amp;b&lt;c&gt;d&quot;e&apos;f"));
+        assert!(xml.contains("<audio silent=\"true\"/>"));
+    }
+
+    #[test]
+    fn recognizes_herdr_executable_names() {
+        assert!(is_herdr_app_image(Path::new(
+            r"C:\Program Files\Herdr\Herdr.exe"
+        )));
+        assert!(is_herdr_app_image(Path::new(
+            r"C:\Users\me\AppData\Local\Programs\herdr-app\herdr-app.exe"
+        )));
+        assert!(!is_herdr_app_image(Path::new(r"C:\Windows\notepad.exe")));
     }
 }

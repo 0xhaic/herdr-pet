@@ -18,6 +18,10 @@ use serde::Deserialize;
 
 use crate::platform;
 
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+#[cfg(target_os = "macos")]
 const BUNDLE_ID: &str = "dev.herdr.app";
 const FOCUS_ATTEMPTS: u32 = 25;
 const FOCUS_RETRY_DELAY: Duration = Duration::from_millis(200);
@@ -159,13 +163,25 @@ pub fn focus_terminal(address: String, sub_agent: bool) {
     }
 }
 
+/// A Herdr CLI process with no console and no attached streams.
+fn herdr_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW.0);
+    }
+    command
+}
+
 fn focus_with(cli: &Path, command: &str, address: &str) -> bool {
     for _ in 0..FOCUS_ATTEMPTS {
-        let focused = Command::new(cli)
+        let focused = herdr_command(cli)
             .args(["do", command, "--terminal", address])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success());
         if focused {
@@ -186,6 +202,7 @@ pub fn raise_app_in_background() {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn raise_app() {
     let _ = Command::new("/usr/bin/open")
         .args(["-b", BUNDLE_ID])
@@ -194,6 +211,21 @@ fn raise_app() {
         .stderr(Stdio::null())
         .status();
 }
+
+/// Launching `herdr-app.exe` restores and focuses the running window; the
+/// process exits on its own, so it is not waited on.
+#[cfg(target_os = "windows")]
+fn raise_app() {
+    let Some(cli) = app_cli() else {
+        return;
+    };
+    if let Err(error) = herdr_command(&cli).spawn() {
+        eprintln!("herdr-pet: cannot raise Herdr: {error}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn raise_app() {}
 
 fn app_cli() -> Option<PathBuf> {
     platform::herdr_app_path()

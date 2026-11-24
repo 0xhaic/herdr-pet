@@ -1,6 +1,7 @@
-//! Desktop notifications and sounds. Never goes through a shell for the
-//! osascript fallback.
+//! Desktop notifications and sounds. The notification fallback never goes
+//! through a shell.
 
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 use crate::platform;
@@ -8,26 +9,26 @@ use crate::status::{AgentStatus, StatusChange};
 
 /// One reminder for all changes collected in a frame; blocked wins.
 pub fn announce(changes: &[StatusChange], sound: bool) {
-    announce_with(
-        changes,
-        sound,
-        |message| {
-            // Bundled runs use the app's own notification identity, so the
-            // banner carries the app icon; bare binaries have no bundle
-            // identifier and fall back to osascript.
-            if !platform::send_notification(message) {
-                run_detached(&mut osascript_command(message));
-            }
-        },
-        run_detached,
-    );
+    announce_with(changes, sound, deliver, play_sound);
+}
+
+/// Show one reminder. Windows toasts need no shell fallback; macOS keeps the
+/// osascript path for bare binaries without a bundle identity.
+fn deliver(message: &str) {
+    if platform::send_notification(message) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    run_detached(&mut osascript_command(message));
+    #[cfg(target_os = "windows")]
+    eprintln!("herdr-pet: cannot show the notification");
 }
 
 fn announce_with(
     changes: &[StatusChange],
     sound: bool,
     mut deliver: impl FnMut(&str),
-    mut run: impl FnMut(&mut Command),
+    mut play: impl FnMut(bool),
 ) {
     let Some(status) = merged_status(changes) else {
         return;
@@ -43,11 +44,36 @@ fn announce_with(
         .unwrap_or("agent");
     deliver(&message_for(status, count, text));
     if sound {
-        run(Command::new("afplay")
-            .arg(format!("/System/Library/Sounds/{}.aiff", sound_for(status))));
+        play(status == AgentStatus::Blocked);
     }
 }
 
+#[cfg(target_os = "macos")]
+fn play_sound(blocked: bool) {
+    let mut command = Command::new("afplay");
+    command.arg(format!(
+        "/System/Library/Sounds/{}.aiff",
+        sound_name(blocked)
+    ));
+    run_detached(&mut command);
+}
+
+#[cfg(target_os = "windows")]
+fn play_sound(blocked: bool) {
+    platform::play_notification_sound(blocked);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn play_sound(blocked: bool) {
+    let _ = blocked;
+}
+
+#[cfg(target_os = "macos")]
+fn sound_name(blocked: bool) -> &'static str {
+    if blocked { "Basso" } else { "Glass" }
+}
+
+#[cfg(target_os = "macos")]
 fn osascript_command(message: &str) -> Command {
     let script = format!(
         "display notification {} with title \"herdr-pet\"",
@@ -84,15 +110,8 @@ fn message_for(status: AgentStatus, count: usize, text: &str) -> String {
     }
 }
 
-fn sound_for(status: AgentStatus) -> &'static str {
-    if status == AgentStatus::Blocked {
-        "Basso"
-    } else {
-        "Glass"
-    }
-}
-
 /// Quote a string for AppleScript: backslash, quote, and line breaks.
+#[cfg(target_os = "macos")]
 fn applescript_string(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('"');
@@ -109,6 +128,7 @@ fn applescript_string(text: &str) -> String {
     quoted
 }
 
+#[cfg(target_os = "macos")]
 fn run_detached(command: &mut Command) {
     match command.spawn() {
         Ok(mut child) => {
@@ -132,6 +152,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn escapes_applescript_strings() {
         assert_eq!(applescript_string("plain"), "\"plain\"");
@@ -163,14 +184,19 @@ mod tests {
     }
 
     #[test]
-    fn done_messages_and_sounds() {
+    fn done_messages() {
         assert_eq!(message_for(AgentStatus::Done, 1, "task"), "task 已完成");
         assert_eq!(
             message_for(AgentStatus::Done, 3, "task"),
             "3 个 agent 已完成"
         );
-        assert_eq!(sound_for(AgentStatus::Blocked), "Basso");
-        assert_eq!(sound_for(AgentStatus::Done), "Glass");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_sound_names() {
+        assert_eq!(sound_name(true), "Basso");
+        assert_eq!(sound_name(false), "Glass");
     }
 
     #[test]
@@ -178,25 +204,21 @@ mod tests {
         let changes = [change(AgentStatus::Blocked, "task")];
 
         let mut delivered = Vec::new();
-        let mut commands = Vec::new();
+        let mut played = Vec::new();
         announce_with(
             &changes,
             false,
             |message| delivered.push(message.to_owned()),
-            |command| commands.push(command.get_program().to_owned()),
+            |blocked| played.push(blocked),
         );
         assert_eq!(delivered, ["task 等待输入"]);
-        assert!(commands.is_empty());
+        assert!(played.is_empty());
 
-        announce_with(
-            &changes,
-            true,
-            |_| {},
-            |command| commands.push(command.get_program().to_owned()),
-        );
-        assert_eq!(commands, ["afplay"]);
+        announce_with(&changes, true, |_| {}, |blocked| played.push(blocked));
+        assert_eq!(played, [true]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn osascript_fallback_quotes_external_text() {
         let command = osascript_command("a\"b\nc");

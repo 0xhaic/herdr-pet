@@ -50,6 +50,20 @@ pub fn prepare_window(window: &winit::window::Window) {
     windows::prepare_window(window);
 }
 
+/// One-time notification setup. Windows registers the toast app id before the
+/// first reminder; other platforms need none.
+pub fn prepare_notifications() {
+    #[cfg(target_os = "windows")]
+    windows::prepare_notifications();
+}
+
+/// Play the platform alert sound. macOS plays it through `afplay` in
+/// `notify.rs`; only Windows routes through here.
+#[cfg(target_os = "windows")]
+pub fn play_notification_sound(blocked: bool) {
+    windows::play_notification_sound(blocked);
+}
+
 /// Rebuild the window's hit region from the visible pet frame. macOS hit-tests
 /// per pixel in `main.rs`; Windows needs an OS-level region so transparent
 /// pixels pass clicks to other applications.

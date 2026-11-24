@@ -1614,6 +1614,7 @@ impl ApplicationHandler for App {
                 return;
             }
         }
+        platform::prepare_notifications();
         match tray::Tray::new() {
             Ok(tray) => {
                 tray.set_click_through(self.config.click_through);
