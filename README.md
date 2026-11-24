@@ -248,6 +248,7 @@ cargo clippy --all-targets -- -D warnings   # 交付前必须全绿
 协议、状态优先级、动画时长与里程碑以 [`docs/design.md`](docs/design.md) 为准；
 模块划分与实现约束见 [`CLAUDE.md`](CLAUDE.md)。
 
-## 开源协议
 
-[MIT](LICENSE) © 2026 0xhaic
+## 开源协议 && 社区
+
+[MIT](LICENSE) © 2026 0xhaic  && [linux.do](https://linux.do/)：交流与讨论。
