@@ -1,18 +1,24 @@
 # herdr-pet Windows 适配方案
 
-> 状态：M0 已实现，待 Windows 实机验收。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
+> 状态：M0 已在 Windows 实机跑通，M1 已实现并进入实机验证。实施期间本文作为
+> Windows 平台的设计、里程碑和验收依据。
 >
-> M0 实施记录（2026-11-25）：Windows 目标通过 `cargo check` 与
-> `cargo clippy --all-targets -- -D warnings` 静态检查，macOS 本机 137 项测试通过；
-> 尚未在 Windows 实机构建或运行。M0 交付：透明窗口与 DirectComposition 渲染、
-> 全局指针拖拽、基于窗口 region 的逐像素点击穿透、彩色托盘图标、`hc connect`
-> 传输与重连、Windows CI 构建 job。气泡、设置面板、通知、Herdr.app 集成按
-> M1–M3 留待后续。
+> M0/M1 实施记录（2026-11-25）：Windows CI（`windows-latest`）通过 fmt、clippy
+> `-D warnings`、测试与 release 构建；产物在 Windows 11（3600×2260，200% 缩放）
+> 实机运行。M0 交付：透明窗口与 DirectComposition 渲染、全局指针拖拽、基于窗口
+> region 的逐像素点击穿透、彩色托盘图标、`hc connect` 传输与重连、Windows CI
+> 构建 job。M1 交付：配置迁移到 `%APPDATA%`（一次性移动旧 `~/.config` 文件）、
+> 按工作区计算的默认位置、跨 DPI 拖动、托盘/宠物菜单中的点击穿透开关。
 >
-> M0 已知限制：托盘“设置…/关于”暂无响应（M3）；Windows 通知尚未接入，状态变化会
-> 尝试 macOS 的 `osascript`/`afplay` 并记录失败（M2）；无宠物目录或 Codex Windows
-> 路径不一致时进程报错退出，需从终端运行或传 `--pet <path>`（M1 确认路径）；
-> 整窗点击穿透开关待 M1 实机验证。
+> 实机验证（合成点击，非真实鼠标）：窗口 region 生效（COMPLEXREGION，约 440 个
+> 矩形），透明区域的点击送达另一进程窗口，宠物本体不穿透；仅 `WS_EX_TRANSPARENT`
+> 的整窗开关无效，改为 `WS_EX_TRANSPARENT | WS_EX_LAYERED` +
+> `SetLayeredWindowAttributes(255, LWA_ALPHA)` 后，命中测试忽略整窗，且
+> DirectComposition 内容截图前后逐像素一致。
+>
+> 已知限制：托盘“设置…/关于”暂无响应（M3）；Windows 通知尚未接入，状态变化会
+> 尝试 macOS 的 `osascript`/`afplay` 并记录失败（M2）；Herdr.app 前台判断与
+> `view.json` 路径（M2）；整窗点击穿透与多显示器混合 DPI 尚待真实鼠标/硬件复核。
 
 ## 1. 已确认决策
 
@@ -155,7 +161,12 @@ Windows 上不引入第二套 GUI 框架：气泡用 Direct2D/DirectWrite 栅格
 - 改用操作系统窗口 region：按当前宠物帧的 atlas alpha（阈值 16）生成水平 run，经 `ExtCreateRegion` + `SetWindowRgn` 设置窗口区域；区域外的透明像素在 win32k 命中测试中被排除，实现跨进程点击穿透。这与 Chromium 对其 Direct3D 透明窗口使用的方案一致；
 - region 只在帧、宠物矩形或缩放变化时重建（`main.rs` 的 `hit_region_key`）。窗口区域同时裁剪绘制，alpha < 16 的不可见边缘会被裁掉；阈值与点击判定一致，M0 实机确认视觉无差异；
 - `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` 通过窗口子类的 `WM_STYLECHANGING` 保持，避免被 winit 的整体样式重写抹掉；
-- 整窗“点击穿透”开关仍使用 `WS_EX_TRANSPARENT`，其跨进程效果需在 M1 实机验证；若无效，按第 8 节改用 layered 兜底；
+- 整窗“点击穿透”开关使用 `WS_EX_TRANSPARENT | WS_EX_LAYERED`，并调用
+  `SetLayeredWindowAttributes(..., 255, LWA_ALPHA)`：实机验证表明仅
+  `WS_EX_TRANSPARENT` 对非 layered 窗口不生效，点击仍被窗口接收；full-alpha 的
+  layered surface 不改变 DirectComposition 内容（截图逐像素一致）；
+- 窗口子类在 `WM_STYLECHANGING` 保持上述两个位，并在 `WM_STYLECHANGED` 重新应用
+  全 alpha，避免 winit 重写样式后点击穿透失效或窗口不再显示；
 - 宠物透明像素判定继续使用 atlas alpha（阈值 16）：macOS 使用 `alpha_at_view`，Windows 使用 `alpha_spans`。
 
 屏幕坐标：
@@ -276,7 +287,9 @@ Windows 首版不追求真实模糊，使用半透明填充：
 
 - `config.rs`：
   - macOS 保持 `$XDG_CONFIG_HOME/herdr-pet/config.json`（默认 `~/.config`）；
-  - Windows 使用 `%APPDATA%\herdr-pet\config.json`。
+  - Windows 使用 `%APPDATA%\herdr-pet\config.json`；首次读取时若新位置不存在而旧位置
+    （`$XDG_CONFIG_HOME` 或 `~/.config`）存在，则把旧文件移动到新位置（跨卷时复制后
+    删除），避免丢失已有设置。
 - 宠物目录：`CODEX_HOME` → `dirs::home_dir()/.codex/pets`；Windows 下即 `%USERPROFILE%\.codex\pets`，需在实机确认 Codex Windows 版本路径。
 - Herdr 图标目录：随 `herdr_app::app_home()` 一起切换。
 - README 增加 Windows 路径表、构建命令、平台差异与已知限制。
@@ -340,6 +353,11 @@ Windows 首版不追求真实模糊，使用半透明填充：
 - 配置路径切换。
 
 → 验证：用户执行验收清单第 1–6 项；宠物跨屏拖动不跳变、不进入任务栏；重启后位置保持。
+
+→ 已实现（2026-11-25）：点击穿透开关同时放进托盘菜单与宠物右键菜单（设置面板在
+M3）；默认位置改用 `rcWork`，拖动按窗口当前 DPI 计算，配置迁移到 `%APPDATA%`。
+验收清单第 1–6 项中，工作区/位置持久化已由代码与实机窗口状态确认，多显示器和真实
+鼠标下的穿透仍需硬件复核。
 
 ### M2 Herdr.app 与提醒
 
@@ -417,9 +435,9 @@ Windows 首版不追求真实模糊，使用半透明填充：
 
 ## 10. 下一步
 
-1. 实施 M0，先交付可运行 exe；
-2. 用户在 Windows 实机验证透明、置顶、拖拽、点击穿透、`hc connect`；
-3. M0 通过后按 M1 → M2 → M3 推进，每个里程碑交付 exe 供手动验收；
-4. 最后完成 M4 发布与文档更新。
+1. ~~M0~~：已完成并在 Windows 实机跑通；
+2. ~~M1~~：已实现并产出验证 exe，真实鼠标与多显示器项待复核；
+3. 下一步 M2：Herdr.app 前台判断、点击跳转、`view.json` 已读状态、Toast 与提示音；
+4. 之后 M3 气泡与设置面板，最后 M4 发布与文档更新。
 
 实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。

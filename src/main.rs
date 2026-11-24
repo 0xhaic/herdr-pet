@@ -232,9 +232,8 @@ struct Drag {
     start_pet: (f64, f64),
     dir: DragDir,
     /// Usable screen areas captured at drag start; the pet may cross them.
+    /// They are physical pixels, so a DPI change mid-drag does not move them.
     areas: Vec<Rect>,
-    /// Window scale the areas and drag offsets are expressed in.
-    scale: f64,
 }
 
 /// Usable area of `monitor`: the screen with its top edge below the menu bar,
@@ -1090,7 +1089,6 @@ impl App {
                 start_pet,
                 dir: DragDir::Right,
                 areas,
-                scale,
             });
             self.click_candidate = Some(pointer);
             self.set_cursor_hittest(true);
@@ -1118,18 +1116,21 @@ impl App {
         drag.dir = step_dir(drag.dir, pointer.0 - drag.last_mouse.0);
         drag.last_mouse = pointer;
         if let Some(window) = self.window.clone() {
+            // The window's scale follows the monitor under it, so crossing a
+            // mixed-DPI boundary resizes the sprite instead of jumping it.
+            let scale = window.scale_factor();
             let target = Rect {
                 x: drag.start_pet.0 + dx,
                 y: drag.start_pet.1 + dy,
-                w: self.chat_layout.pet.w * drag.scale,
-                h: self.chat_layout.pet.h * drag.scale,
+                w: self.chat_layout.pet.w * scale,
+                h: self.chat_layout.pet.h * scale,
             };
             let pet = clamp_pet_to_screens(target, &drag.areas);
-            let layout = self.chat_layout_for_pet(pet, drag.scale, &drag.areas);
+            let layout = self.chat_layout_for_pet(pet, scale, &drag.areas);
             self.chat_layout = layout;
             window.set_outer_position(PhysicalPosition::new(
-                (pet.x - layout.pet.x * drag.scale).round() as i32,
-                (pet.y - layout.pet.y * drag.scale).round() as i32,
+                (pet.x - layout.pet.x * scale).round() as i32,
+                (pet.y - layout.pet.y * scale).round() as i32,
             ));
         }
         self.dragging = Some(drag);
@@ -1302,6 +1303,12 @@ impl App {
                 }
                 Action::Settings => self.open_panel(),
                 Action::About => platform::show_about(),
+                // Windows has no settings panel yet, so the menus own this
+                // switch; the tray icon stays visible while it is on.
+                #[cfg(target_os = "windows")]
+                Action::ToggleClickThrough => {
+                    self.set_click_through(!self.config.click_through);
+                }
                 Action::Quit => {
                     self.save_config();
                     event_loop.exit();
@@ -1420,6 +1427,9 @@ impl App {
         }
         // Let the next tick reapply the per-pixel state on macOS.
         self.cursor_hittest = None;
+        if let Some(tray) = &self.tray {
+            tray.set_click_through(enabled);
+        }
         self.apply_tray_visibility();
         self.save_config();
         self.sync_panel();
@@ -1576,6 +1586,18 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // The window may open on a monitor whose scale differs from the
+        // primary one, so re-anchor the saved pet with the window's scale.
+        if let Some(anchor) = self
+            .config
+            .position
+            .filter(|anchor| pet_visible(event_loop, *anchor, pet_width, pet_height))
+        {
+            let scale = window.scale_factor();
+            if scale != self.primary_scale {
+                window.set_outer_position(anchor_to_window(anchor, &self.chat_layout, scale));
+            }
+        }
         platform::prepare_window(&window);
         platform::set_click_through(&window, self.config.click_through);
         if !platform::float_on_all_spaces(&window) {
@@ -1593,7 +1615,10 @@ impl ApplicationHandler for App {
             }
         }
         match tray::Tray::new() {
-            Ok(tray) => self.tray = Some(tray),
+            Ok(tray) => {
+                tray.set_click_through(self.config.click_through);
+                self.tray = Some(tray);
+            }
             Err(error) => eprintln!("herdr-pet: tray unavailable: {error:#}"),
         }
         self.apply_tray_visibility();
@@ -1709,11 +1734,13 @@ fn default_position(event_loop: &ActiveEventLoop, layout: &ChatLayout) -> Physic
     // The window grew sideways to let the bubble slide; centre that extra
     // width so the default pet position matches the old bubble-sized window.
     let base_width = ((chat::BUBBLE_WIDTH + chat::WINDOW_PAD * 2.0) * scale).round() as i32;
-    let size = monitor.size();
-    let position = monitor.position();
+    // The work area, not the full monitor, keeps the pet above the taskbar.
+    let area = screen_area(&monitor);
+    let right = (area.x + area.w).round() as i32;
+    let bottom = (area.y + area.h).round() as i32;
     PhysicalPosition::new(
-        position.x + size.width as i32 - margin - base_width - (width - base_width) / 2,
-        position.y + size.height as i32 - height - margin,
+        right - margin - base_width - (width - base_width) / 2,
+        bottom - height - margin,
     )
 }
 

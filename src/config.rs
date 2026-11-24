@@ -59,14 +59,79 @@ impl Default for Config {
 }
 
 pub fn config_path() -> Result<PathBuf> {
-    // `dirs::config_dir()` is ~/Library/Application Support on macOS; the
-    // documented path is $XDG_CONFIG_HOME or ~/.config.
+    #[cfg(target_os = "windows")]
+    {
+        // Windows keeps its per-user files under the roaming profile; the
+        // milestone before this one wrote to ~/.config, so move that file
+        // once instead of losing the user's settings.
+        let dir = dirs::config_dir().context("cannot locate %APPDATA%")?;
+        let path = dir.join("herdr-pet").join("config.json");
+        if !path.exists()
+            && let Some(legacy) = legacy_config_path()
+        {
+            migrate_legacy_config(&path, &legacy);
+        }
+        Ok(path)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // `dirs::config_dir()` is ~/Library/Application Support on macOS; the
+        // documented path is $XDG_CONFIG_HOME or ~/.config.
+        let dir = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+            .context("cannot locate the user config directory")?;
+        Ok(dir.join("herdr-pet").join("config.json"))
+    }
+}
+
+/// The pre-M1 Windows location, computed the way macOS still does.
+#[cfg(target_os = "windows")]
+fn legacy_config_path() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
-        .context("cannot locate the user config directory")?;
-    Ok(dir.join("herdr-pet").join("config.json"))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))?;
+    Some(dir.join("herdr-pet").join("config.json"))
+}
+
+/// Move the legacy config into the roaming profile. A cross-volume rename
+/// fails, so fall back to copy-and-delete.
+#[cfg(target_os = "windows")]
+fn migrate_legacy_config(target: &Path, legacy: &Path) -> bool {
+    if target.exists() || !legacy.is_file() {
+        return false;
+    }
+    if let Some(parent) = target.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        eprintln!("herdr-pet: cannot create {}: {error}", parent.display());
+        return false;
+    }
+    let moved = fs::rename(legacy, target).or_else(|_| {
+        fs::copy(legacy, target)
+            .map(|_| ())
+            .and_then(|()| fs::remove_file(legacy))
+    });
+    match moved {
+        Ok(()) => {
+            eprintln!(
+                "herdr-pet: moved the config from {} to {}",
+                legacy.display(),
+                target.display()
+            );
+            true
+        }
+        Err(error) => {
+            eprintln!(
+                "herdr-pet: cannot move {} to {}: {error}",
+                legacy.display(),
+                target.display()
+            );
+            false
+        }
+    }
 }
 
 /// Missing or broken files fall back to defaults; the user's file is left
@@ -224,6 +289,26 @@ mod tests {
             "{not json",
             "load must not overwrite the user's file"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn legacy_config_moves_to_the_roaming_profile() {
+        let temp = TempDir::new();
+        let legacy = temp.join("legacy.json");
+        let target = temp.join("herdr-pet").join("config.json");
+        fs::write(&legacy, r#"{"size": 150.0}"#).unwrap();
+
+        assert!(migrate_legacy_config(&target, &legacy));
+        assert!(!legacy.exists(), "the legacy file is moved, not copied");
+        assert_eq!(load_from(&target).size, 150.0);
+
+        // The target wins and an unrelated legacy file stays untouched.
+        let other = temp.join("other.json");
+        fs::write(&other, r#"{"size": 80.0}"#).unwrap();
+        assert!(!migrate_legacy_config(&target, &other));
+        assert_eq!(load_from(&target).size, 150.0);
+        assert!(other.exists());
     }
 
     #[test]

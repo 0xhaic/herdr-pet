@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     DeleteObject, ExtCreateRegion, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, RDH_RECTANGLES, RGNDATA, RGNDATAHEADER, SetWindowRgn,
@@ -16,8 +16,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGING,
+    GWL_EXSTYLE, GetCursorPos, GetWindowLongPtrW, LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGED, WM_STYLECHANGING, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use winit::monitor::MonitorHandle;
@@ -69,30 +70,48 @@ pub fn prepare_window(window: &Window) {
 pub fn set_cursor_hittest(_window: &Window, _hittest: bool) {}
 
 /// Apply the whole-window click-through setting.
+///
+/// A non-layered `WS_EX_TRANSPARENT` window still receives mouse input, so
+/// the window also becomes layered: the OS then ignores the window shape for
+/// hit testing and clicks reach whatever sits below. A full-alpha layered
+/// surface leaves the DirectComposition content unchanged.
 pub fn set_click_through(window: &Window, click_through: bool) {
     CLICK_THROUGH.store(click_through, Ordering::Relaxed);
     if let Some(hwnd) = hwnd(window) {
-        set_transparent_style(hwnd, click_through);
+        apply_click_through(hwnd);
     }
 }
 
-/// Add or remove `WS_EX_TRANSPARENT` without touching the window's other
-/// styles. A style change is immediately visible to hit testing, so no
-/// frame-wide `SetWindowPos` is needed.
-fn set_transparent_style(hwnd: HWND, transparent: bool) {
-    let bit = WS_EX_TRANSPARENT.0 as isize;
+/// Mirror the click-through setting onto the window. The subclass calls this
+/// again after every style rewrite so winit cannot drop the bits.
+fn apply_click_through(hwnd: HWND) {
+    let click_through = CLICK_THROUGH.load(Ordering::Relaxed);
+    let flags = (WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0) as isize;
     // SAFETY: the HWND belongs to a live winit window on the main thread.
-    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-    let updated = if transparent {
-        style | bit
-    } else {
-        style & !bit
-    };
-    if updated != style {
-        // SAFETY: same HWND; the new style keeps every other bit intact.
-        unsafe {
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let updated = if click_through {
+            style | flags
+        } else {
+            style & !flags
+        };
+        if updated != style {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated);
         }
+        if click_through {
+            // A layered window without attributes is not displayed; full
+            // alpha keeps every pixel the composition already draws.
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+        }
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
     }
 }
 
@@ -190,7 +209,7 @@ fn region_bounds(rects: &[RECT]) -> RECT {
 
 /// Keep the focus-free styles when winit rewrites the whole `WS_EX` bitfield
 /// for its own flag changes (visibility, topmost, ...), and mirror the
-/// click-through setting onto `WS_EX_TRANSPARENT`.
+/// click-through setting onto `WS_EX_TRANSPARENT | WS_EX_LAYERED`.
 unsafe extern "system" fn subclass_proc(
     hwnd: HWND,
     message: u32,
@@ -206,12 +225,25 @@ unsafe extern "system" fn subclass_proc(
                 let style = &mut *(lparam.0 as *mut STYLESTRUCT);
                 style.styleNew |= WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0;
                 if CLICK_THROUGH.load(Ordering::Relaxed) {
-                    style.styleNew |= WS_EX_TRANSPARENT.0;
+                    style.styleNew |= WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0;
                 } else {
-                    style.styleNew &= !WS_EX_TRANSPARENT.0;
+                    style.styleNew &= !(WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0);
                 }
             }
             // SAFETY: forward the (possibly adjusted) style change to winit.
+            unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+        }
+        WM_STYLECHANGED if wparam.0 as i32 == GWL_EXSTYLE.0 => {
+            // Re-adding `WS_EX_LAYERED` resets its attributes; full alpha
+            // keeps the DirectComposition content visible.
+            if CLICK_THROUGH.load(Ordering::Relaxed) {
+                // SAFETY: the HWND belongs to a live winit window on the main
+                // thread and the style change above kept it layered.
+                unsafe {
+                    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+                }
+            }
+            // SAFETY: forward the style change to winit.
             unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
         }
         // SAFETY: every other message belongs to winit's own window proc.
