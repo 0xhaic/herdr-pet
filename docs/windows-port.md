@@ -1,7 +1,7 @@
 # herdr-pet Windows 适配方案
 
-> 状态：M0、M1 已通过 Windows 实机验收（多显示器项按用户要求跳过）。实施期间
-> 本文作为 Windows 平台的设计、里程碑和验收依据。
+> 状态：M0–M2 已通过 Windows 实机验收（多显示器项按用户要求跳过；M2 提示音待听感
+> 确认）。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
 >
 > M0/M1 实施记录（2026-11-25）：Windows CI（`windows-latest`）通过 fmt、clippy
 > `-D warnings`、测试与 release 构建；产物在 Windows 11（3600×2260，200% 缩放）
@@ -17,6 +17,10 @@
 >   恢复拖动；
 > - 任务栏无图标、Alt+Tab 无条目，重启后宠物位置保持（验收清单第 2、4 项）。
 >
+> M2 实机验证（2026-11-25）：点击宠物拉起 Herdr 并聚焦当前 agent；blocked 状态
+> 触发 Toast（显示“osc-test2 等待输入”，`LastNotificationAddedTime` 同步更新）；
+> 提示音走系统别名，待用户确认听感。
+>
 > 多显示器/混合 DPI（第 3 项）按用户要求跳过，未验证；设置/关于（第 6 项）随 M3
 > 交付。此前合成点击的辅助验证：窗口 region 生效（COMPLEXREGION，约 440 个矩形），
 > 透明区域的点击送达另一进程窗口，宠物本体不穿透；仅 `WS_EX_TRANSPARENT` 的整窗
@@ -24,9 +28,9 @@
 > `SetLayeredWindowAttributes(255, LWA_ALPHA)` 后，命中测试忽略整窗，且
 > DirectComposition 内容截图前后逐像素一致。
 >
-> 已知限制：托盘“设置…/关于”暂无响应（M3）；Windows 通知尚未接入，状态变化会
-> 尝试 macOS 的 `osascript`/`afplay` 并记录失败（M2）；Herdr.app 前台判断与
-> `view.json` 路径（M2）；多显示器混合 DPI 未验证（按用户要求跳过）。
+> 已知限制：托盘“设置…/关于”暂无响应（M3）；气泡与按钮仍是空壳，前台隐藏效果要到
+> M3 才可见；Toast 暂用系统默认图标（exe 图标随 M4）；多显示器混合 DPI 未验证
+> （按用户要求跳过）。
 
 ## 1. 已确认决策
 
@@ -219,17 +223,23 @@ enum Transport {
 
 - `app_home()`：
   - macOS 保持 `HERDR_APP_HOME` → `XDG_CONFIG_HOME/herdr-app` → `~/.config/herdr-app`；
-  - Windows 使用 `HERDR_APP_HOME` → `dirs::config_dir()/herdr-app`（预计 `%APPDATA%\herdr-app`，需实机确认）。
+  - Windows 与 macOS 相同（实机确认 `view.json`、`icons` 都在 `~/.config/herdr-app`，
+    无需改用 `%APPDATA%`）。
 - `focus_terminal`：
   - 不再使用 `/usr/bin/open -b dev.herdr.app`；
-  - 直接启动找到的 `herdr-app.exe`，然后执行 `agent.focus` / `terminal.peek`；
+  - 启动找到的 `herdr-app.exe`：无参启动会恢复并聚焦已运行窗口（最小化后实测）；
+  - 实机确认 CLI 为 `herdr-app.exe do agent.focus --terminal <address>`，
+    `terminal.peek` 参数相同；
   - 子 agent 仍先 `terminal.peek`，失败回退 `agent.focus`；
-  - 子进程用 `CREATE_NO_WINDOW`，保留 25 × 200ms 重试。
+  - 子进程用 `CREATE_NO_WINDOW`，保留 25 × 200ms 重试；
+  - 发现顺序：PATH 的 `herdr-app.exe` / `Herdr.exe` →
+    `%LOCALAPPDATA%\Programs\herdr-app\herdr-app.exe` →
+    `%LOCALAPPDATA%\Programs\Herdr\Herdr.exe`（进程内缓存一次）。
 - 前台判断：
   - `GetForegroundWindow` → `GetWindowThreadProcessId` → `QueryFullProcessImageNameW`；
   - 与 Herdr 可执行文件路径比较，路径不可得时比较文件名 `Herdr.exe` / `herdr-app.exe`；
   - 仍每 250ms 查询一次。
-- `view.json` 已读逻辑不变，只改 app home；
+- `view.json` 已读逻辑不变（实机确认 Windows 的 `attention.seen` 结构一致）；
 - 找不到 Herdr 时按现有策略降级：图标隐藏、点击只尝试拉起，不影响宠物和气泡。
 
 ### 4.5 聊天浮层
@@ -276,14 +286,14 @@ Windows 首版不追求真实模糊，使用半透明填充：
 
 通知与声音：
 
-- Toast 用 `windows` crate 的 WinRT API，AUMID 固定为 `0xhaic.herdr-pet`；
-- 单 exe 没有安装器注册 AUMID，首版按以下顺序处理：
-  1. 设置进程 AUMID 后直接尝试 toast；
-  2. 若实机验证不显示，首次通知时在 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\herdr-pet.lnk` 创建带 AUMID 的快捷方式（best-effort）；
-  3. 仍失败则只播放提示音并记录日志，不弹阻塞对话框；
-  4. 如实机确认 toast 不可用，再补托盘气泡（`Shell_NotifyIcon` NIF_INFO）。
+- Toast 用 `windows` crate 的 WinRT API，AUMID 为 `dev.herdr.pet`；
+- 实机结论：单 exe 未注册 AUMID 时 `Show` 返回成功但系统静默丢弃；在
+  `HKCU\Software\Classes\AppUserModelId\dev.herdr.pet` 写入 `DisplayName=herdr-pet`
+  后 Toast 正常显示，无需 Start Menu 快捷方式，也无需设置进程 AUMID；
+- 应用启动时注册一次；Toast XML 带 `<audio silent="true"/>`，声音只由配置控制；
+- 首版使用系统默认图标，exe 图标随 M4 加入；
 - 声音：`PlaySoundW` 系统别名，blocked → `SystemHand`，done → `SystemAsterisk`；
-- `notify.rs` 的 osascript 回落改为平台函数，Windows 不再拼接 AppleScript；
+- `notify.rs` 按平台拆分：macOS 保留 osascript/afplay，Windows 走平台实现；
 - `config.notifications` / `notification_sound` 语义保持不变。
 
 关于：
@@ -378,6 +388,11 @@ Windows 首版不追求真实模糊，使用半透明填充：
 
 → 验证：用户执行验收清单第 9–11 项；用真实 herdr-core/Herdr 确认提醒、前台隐藏、点击跳转；已读 done 在查看后从 review 回坐姿。
 
+→ 已实现并验证（2026-11-25）：前台判断、点击跳转与 `view.json` 已读路径接通；
+Toast 在 AppUserModelId 注册后实机弹出（“osc-test2 等待输入”），点击宠物实测拉起
+Herdr 并聚焦当前 agent；提示音走 `PlaySoundW`（听感待用户确认）。前台判断的可视
+效果（气泡/按钮隐藏）随 M3 气泡一起验收。
+
 ### M3 气泡与设置面板
 
 内容：
@@ -445,7 +460,7 @@ Windows 首版不追求真实模糊，使用半透明填充：
 
 1. ~~M0~~：已完成并在 Windows 实机跑通；
 2. ~~M1~~：已通过实机验收（多显示器按用户要求跳过）；
-3. 下一步 M2：Herdr.app 前台判断、点击跳转、`view.json` 已读状态、Toast 与提示音；
-4. 之后 M3 气泡与设置面板，最后 M4 发布与文档更新。
+3. ~~M2~~：已实现；Toast 与点击跳转已实机验证，提示音待听感确认；
+4. 下一步 M3：气泡与设置面板（含托盘“设置/关于”），最后 M4 发布与文档更新。
 
 实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。
