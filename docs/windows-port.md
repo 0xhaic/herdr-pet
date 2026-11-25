@@ -1,8 +1,9 @@
 # herdr-pet Windows 适配方案
 
 > 状态：M0–M3 已通过 Windows 实机验收（多显示器项按用户要求跳过；M2 提示音待听感
-> 确认）；M4 已实现并完成发布前实机验证，随 v0.1.20 发布。实施期间本文作为
-> Windows 平台的设计、里程碑和验收依据。
+> 确认）；M4 已实现并完成发布前实机验证，已随 v0.1.20 发布（Release 同时包含
+> dmg 与 exe）；验收清单第 12 项待用户执行。实施期间本文作为 Windows 平台的设计、
+> 里程碑和验收依据。
 >
 > M0/M1 实施记录（2026-11-25）：Windows CI（`windows-latest`）通过 fmt、clippy
 > `-D warnings`、测试与 release 构建；产物在 Windows 11（3600×2260，200% 缩放）
@@ -474,6 +475,13 @@ subsystem=2，无控制台窗口），exe 内嵌 6 种尺寸图标与 comctl32 v
 Release（并发创建 Release 时回退为 upload）。验收清单第 12 项（干净机器运行）待
 用户在发布后执行。
 
+→ 已发布（2026-11-25）：`v0.1.20` Release 同时包含
+`herdr-pet-0.1.20-macos-arm64.dmg` 与 `herdr-pet-0.1.20-windows-x64.exe`
+（https://github.com/0xhaic/herdr-pet/releases/tag/v0.1.20）。发布版
+exe 的 PE subsystem=2（无控制台），FileVersion/ProductVersion 均为 0.1.20，exe
+图标正常；「关于」TaskDialog 实机显示版本 0.1.20 与仓库地址。验收清单第 12 项
+（干净 Windows 机器直接运行单 exe）仍待用户执行。
+
 ## 7. Windows 手动验收清单
 
 每个里程碑至少覆盖相关项：
@@ -520,7 +528,7 @@ Release（并发创建 Release 时回退为 upload）。验收清单第 12 项�
 3. ~~M2~~：已实现；Toast 与点击跳转已实机验证，提示音待听感确认；
 4. ~~M3~~：已实现并完成合成鼠标验证；第 7–8 项真实鼠标验收已通过；
 5. ~~M4~~：已实现（`windows_subsystem`、exe 图标与 manifest、TaskDialog、Windows
-   CI 发布 job、README/design/release notes）；随 v0.1.20 发布，验收清单第 12 项
+   CI 发布 job、README/design/release notes）；已随 v0.1.20 发布，验收清单第 12 项
    （干净 Windows 机器直接运行单 exe）待用户执行。
 
 实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。M3 另确认：Direct2D DC render target 与
