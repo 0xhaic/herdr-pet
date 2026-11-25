@@ -38,8 +38,8 @@ pub struct Tray {
     tray: TrayIcon,
     /// Pet right-click menu, shown while the menu-bar icon is hidden.
     pet_menu: Menu,
-    /// Windows exposes the whole-window pass-through switch in both menus
-    /// until the settings panel lands (M3).
+    /// Windows also mirrors the whole-window pass-through switch in both
+    /// menus, so it stays reachable when the tray icon is hidden.
     #[cfg(target_os = "windows")]
     click_through_items: Vec<muda::CheckMenuItem>,
 }
@@ -51,8 +51,8 @@ impl Tray {
         let about = MenuItem::with_id(ID_ABOUT, "关于", true, None);
         let quit = MenuItem::with_id(ID_QUIT, "退出", true, None);
         let separator = PredefinedMenuItem::separator();
-        // The settings panel arrives with M3; until then Windows puts the
-        // click-through switch directly in both menus so it stays reachable.
+        // Windows mirrors the click-through switch in both menus as well, so
+        // it stays reachable while the tray icon is hidden.
         #[cfg(target_os = "windows")]
         let tray_click_through =
             muda::CheckMenuItem::with_id(ID_CLICK_THROUGH, "点击穿透", true, false, None);

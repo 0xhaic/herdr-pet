@@ -32,20 +32,18 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    LWA_ALPHA, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGED, WM_STYLECHANGING,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MB_TOPMOST, MessageBoxW, STYLESTRUCT, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGED, WM_STYLECHANGING, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use winit::monitor::MonitorHandle;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
-use crate::chat::{ChatLayout, Rect};
-use crate::config::Config;
+use crate::chat::Rect;
 use crate::pet::{Atlas, CELL_H, CELL_W, Frame};
-use crate::platform::PanelAction;
-use crate::status::AgentStatus;
 
 /// Whole-window click-through setting, mirrored onto `WS_EX_TRANSPARENT`
 /// whenever winit rewrites the window styles.
@@ -111,37 +109,40 @@ fn apply_click_through(hwnd: HWND) {
         } else {
             style & !flags
         };
-        if updated != style {
+        let changed = updated != style;
+        if changed {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated);
         }
-        if click_through {
+        if click_through && changed {
             // A layered window without attributes is not displayed; full
             // alpha keeps every pixel the composition already draws.
             let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
         }
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
-        );
+        if changed {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        }
     }
 }
 
-/// Rebuild the window's hit region from the visible pet frame. A Direct3D /
-/// DirectComposition window is not hit-tested by its alpha, and
-/// `WS_EX_LAYERED` would give up the GPU presentation, so an OS window
-/// region is the cross-process way to let transparent pixels fall through.
-/// Chromium uses the same approach for its Direct3D transparent windows.
-/// The M3 bubble must be added to this region once it renders.
+/// Rebuild the window's hit region from the visible pet frame plus the drawn
+/// overlay rectangles. A Direct3D / DirectComposition window is not hit-tested
+/// by its alpha, and `WS_EX_LAYERED` would give up the GPU presentation, so an
+/// OS window region is the cross-process way to let transparent pixels fall
+/// through. Chromium uses the same approach for its transparent windows.
 pub fn update_pet_region(
     window: &Window,
     atlas: &Atlas,
     frame: Frame,
     pet: Rect,
+    extras: &[Rect],
     scale: f64,
     alpha_threshold: u8,
 ) {
@@ -152,7 +153,7 @@ pub fn update_pet_region(
         return;
     }
     let spans = atlas.alpha_spans(frame.row, frame.col, alpha_threshold);
-    if spans.is_empty() {
+    if spans.is_empty() && extras.is_empty() {
         // An empty region would hide the window; keep the previous shape.
         return;
     }
@@ -160,7 +161,7 @@ pub fn update_pet_region(
     let scale_y = pet.h * scale / f64::from(CELL_H);
     let origin_x = pet.x * scale;
     let origin_y = pet.y * scale;
-    let rects: Vec<RECT> = spans
+    let mut rects: Vec<RECT> = spans
         .iter()
         .map(|&(y, x0, x1)| RECT {
             left: (origin_x + f64::from(x0) * scale_x).floor() as i32,
@@ -169,6 +170,14 @@ pub fn update_pet_region(
             bottom: (origin_y + f64::from(y + 1) * scale_y).ceil() as i32,
         })
         .collect();
+    for extra in extras {
+        rects.push(RECT {
+            left: (extra.x * scale).floor() as i32,
+            top: (extra.y * scale).floor() as i32,
+            right: ((extra.x + extra.w) * scale).ceil() as i32,
+            bottom: ((extra.y + extra.h) * scale).ceil() as i32,
+        });
+    }
     apply_window_region(hwnd, &rects);
 }
 
@@ -540,8 +549,27 @@ fn is_herdr_app_image(image: &Path) -> bool {
         })
 }
 
-/// The TaskDialog arrives with the settings milestone (M3).
-pub fn show_about() {}
+/// About dialog. The development exe has no manifest, so comctl32 v6 and its
+/// TaskDialog are not available yet; the release milestone adds the manifest
+/// and can upgrade this to a task dialog with a clickable repository link.
+pub fn show_about() {
+    const REPOSITORY: &str = "github.com/0xhaic/herdr-pet";
+    let body = format!(
+        "由 herdr-core 中 agent 状态驱动的桌面宠物。\n\n版本 {}\n{REPOSITORY}",
+        env!("CARGO_PKG_VERSION")
+    );
+    let body: Vec<u16> = body.encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = "herdr-pet".encode_utf16().chain(Some(0)).collect();
+    // SAFETY: both strings are live NUL-terminated wide buffers for the call.
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION | MB_TOPMOST,
+        );
+    }
+}
 
 /// Show `menu` as a context menu for the window. Must run on the main thread,
 /// which winit event callbacks guarantee; `None` places it at the pointer.
@@ -556,58 +584,11 @@ pub fn show_context_menu(window: &Window, menu: &muda::Menu) {
     unsafe { menu.show_context_menu_for_hwnd(hwnd.0 as isize, None) };
 }
 
-// The Direct2D bubble bitmap (M3) replaces these stubs.
-pub struct ChatOverlay;
+mod overlay;
+mod settings;
 
-impl ChatOverlay {
-    pub fn new(_window: &Window, _open: bool, _opacity: f64) -> Option<Self> {
-        None
-    }
-
-    pub fn layout(&self, _layout: &ChatLayout, _height: f64, _pager: bool) {}
-
-    pub fn set_text(&self, _title: &str, _subtitle: &str) {}
-
-    pub fn set_icon(&self, _icon: Option<(&Path, bool)>) {}
-
-    pub fn set_status(&self, _status: Option<AgentStatus>) {}
-
-    pub fn set_visible(&self, _bubble: bool, _button: bool) {}
-
-    pub fn set_opacity(&self, _opacity: f64) {}
-}
-
-// The native Win32 settings panel (M3) replaces this stub.
-pub struct SettingsPanel;
-
-impl SettingsPanel {
-    pub fn new(
-        _pets: &[String],
-        _selected: usize,
-        _config: &Config,
-        _pets_dir: &Path,
-        _custom_dir: bool,
-    ) -> Option<Self> {
-        None
-    }
-
-    pub fn show(&self) {}
-
-    pub fn poll(&mut self) -> Vec<PanelAction> {
-        Vec::new()
-    }
-
-    pub fn sync(&mut self, _config: &Config, _selected: usize) {}
-
-    pub fn sync_pets(
-        &mut self,
-        _pets: &[String],
-        _selected: usize,
-        _pets_dir: &Path,
-        _custom_dir: bool,
-    ) {
-    }
-}
+pub use overlay::ChatOverlay;
+pub use settings::SettingsPanel;
 
 #[cfg(test)]
 mod tests {

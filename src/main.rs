@@ -486,25 +486,40 @@ struct WindowSnapshot {
 }
 
 /// Inputs the Windows hit region was last built from. Rebuilding scans the
-/// atlas cell, so it only happens when the frame, pet rect or scale changes.
+/// atlas cell, so it only happens when the frame, pet rect, overlay rects or
+/// scale changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HitRegionKey {
     frame: Frame,
     scale: u64,
     pet: (u64, u64, u64, u64),
+    bubble: Option<(u64, u64, u64, u64)>,
+    button: Option<(u64, u64, u64, u64)>,
+}
+
+fn rect_bits(rect: Rect) -> (u64, u64, u64, u64) {
+    (
+        rect.x.to_bits(),
+        rect.y.to_bits(),
+        rect.w.to_bits(),
+        rect.h.to_bits(),
+    )
 }
 
 impl HitRegionKey {
-    fn new(frame: Frame, pet: Rect, scale: f64) -> Self {
+    fn new(
+        frame: Frame,
+        pet: Rect,
+        bubble: Option<Rect>,
+        button: Option<Rect>,
+        scale: f64,
+    ) -> Self {
         Self {
             frame,
             scale: scale.to_bits(),
-            pet: (
-                pet.x.to_bits(),
-                pet.y.to_bits(),
-                pet.w.to_bits(),
-                pet.h.to_bits(),
-            ),
+            pet: rect_bits(pet),
+            bubble: bubble.map(rect_bits),
+            button: button.map(rect_bits),
         }
     }
 }
@@ -792,10 +807,11 @@ impl App {
 
     fn apply_chat_visibility(&mut self) {
         let bubble = self.bubble_visible();
-        if let Some(overlay) = &self.overlay {
+        if let Some(overlay) = self.overlay.as_mut() {
             overlay.set_visible(bubble, self.chat_enabled);
         }
         self.next_tick = Instant::now();
+        self.sync_overlay_bitmap();
     }
 
     fn drain_attention(&mut self) {
@@ -935,7 +951,7 @@ impl App {
         if self.last_chat_text.as_ref() == Some(&text) {
             return;
         }
-        if let Some(overlay) = &self.overlay {
+        if let Some(overlay) = self.overlay.as_mut() {
             overlay.set_text(&text.title, &text.subtitle);
             overlay.set_status(text.status);
             let icon = text
@@ -1016,11 +1032,36 @@ impl App {
         if self.overlay_key == Some(key) {
             return;
         }
-        if let Some(overlay) = &self.overlay {
+        let bubble = self.bubble_visible();
+        if let Some(overlay) = self.overlay.as_mut() {
             overlay.layout(&self.chat_layout, f64::from(size.height) / scale, pager);
-            overlay.set_visible(self.bubble_visible(), self.chat_enabled);
+            overlay.set_visible(bubble, self.chat_enabled);
         }
         self.overlay_key = Some(key);
+        self.force_redraw = true;
+    }
+
+    /// Upload a freshly rasterized chat overlay (Windows) and request a
+    /// redraw. AppKit draws the overlay with native views, so `take_bitmap`
+    /// returns None there. While neither the bubble nor the button is shown,
+    /// the renderer draws no overlay at all.
+    fn sync_overlay_bitmap(&mut self) {
+        let visible = self.bubble_visible() || self.chat_enabled;
+        let Some(overlay) = self.overlay.as_mut() else {
+            return;
+        };
+        if !visible {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_overlay(None);
+            }
+            return;
+        }
+        let Some(bitmap) = overlay.take_bitmap() else {
+            return;
+        };
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_overlay(Some(&bitmap));
+        }
         self.force_redraw = true;
     }
 
@@ -1033,11 +1074,25 @@ impl App {
         };
         let scale = window.scale_factor();
         let pet = self.chat_layout.pet;
-        let key = HitRegionKey::new(frame, pet, scale);
+        // The drawn bubble and toggle also have to be clickable, which on
+        // Windows means joining their rectangles to the pet's hit region.
+        let drawn = self.overlay.is_some();
+        let bubble = (drawn && self.bubble_visible()).then_some(self.chat_layout.bubble);
+        let button = (drawn && self.chat_enabled).then_some(self.chat_layout.button);
+        let key = HitRegionKey::new(frame, pet, bubble, button, scale);
         if self.hit_region_key == Some(key) {
             return;
         }
-        platform::update_pet_region(window, &self.pet.atlas, frame, pet, scale, CLICK_ALPHA);
+        let extras: Vec<Rect> = [bubble, button].into_iter().flatten().collect();
+        platform::update_pet_region(
+            window,
+            &self.pet.atlas,
+            frame,
+            pet,
+            &extras,
+            scale,
+            CLICK_ALPHA,
+        );
         self.hit_region_key = Some(key);
     }
 
@@ -1244,8 +1299,10 @@ impl App {
             self.last_anim_input = Some(input);
         }
         // The Thinking placeholder animates on its own clock, so refresh the
-        // bubble every tick; `sync_chat` only touches AppKit when text changes.
+        // bubble every tick; `sync_chat` only touches the overlay when text
+        // changes.
         self.sync_chat();
+        self.sync_overlay_bitmap();
         let frame = self.frame;
 
         self.sync_hit_region(frame);
@@ -1460,9 +1517,10 @@ impl App {
 
     fn set_chat_opacity(&mut self, opacity: f64) {
         self.config.chat_opacity = clamp_chat_opacity(opacity);
-        if let Some(overlay) = &self.overlay {
+        if let Some(overlay) = self.overlay.as_mut() {
             overlay.set_opacity(self.config.chat_opacity);
         }
+        self.sync_overlay_bitmap();
         self.sync_panel();
         self.schedule_save();
     }
@@ -1638,6 +1696,7 @@ impl ApplicationHandler for App {
         self.sync_bubble_placement();
         self.sync_overlay();
         self.sync_chat();
+        self.sync_overlay_bitmap();
         self.sync_hit_region(self.frame);
         // Start hidden until the first snapshot says an agent is active.
         self.apply_chat_visibility();

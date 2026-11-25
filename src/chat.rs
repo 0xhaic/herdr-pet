@@ -31,9 +31,7 @@ pub const ARROW_SIZE: f64 = 22.0;
 pub const ARROW_GAP: f64 = 4.0;
 /// Inset from the bubble's right edge to the next arrow.
 pub const ARROW_INSET: f64 = 8.0;
-/// Width the bubble text keeps clear for both arrows. The Windows overlay
-/// that consumes it lands in M3.
-#[cfg_attr(target_os = "windows", allow(dead_code))]
+/// Width the bubble text keeps clear for both arrows.
 pub const ARROW_RESERVED: f64 = ARROW_INSET + ARROW_SIZE * 2.0 + ARROW_GAP;
 
 /// Longest text handed to a single label line; the label truncates the rest.
@@ -298,7 +296,7 @@ fn thinking_label(elapsed_ms: u64) -> String {
 
 /// SF Symbol shown before the subtitle for each state. `Working` renders as
 /// the native spinner at runtime; the no-agent placeholder gets a neutral
-/// dots glyph. The Windows overlay that consumes it lands in M3.
+/// dots glyph. The Windows overlay draws its own vector glyphs instead.
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 pub fn status_symbol(status: Option<AgentStatus>) -> &'static str {
     match status {

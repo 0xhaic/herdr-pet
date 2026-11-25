@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use winit::window::Window;
 
 use crate::pet::Atlas;
+use crate::platform::OverlayBitmap;
 
 const SHADER: &str = r#"
 struct Rect {
@@ -65,6 +66,15 @@ struct FrameUniform {
     bounds: [f32; 4],
 }
 
+/// The uploaded chat overlay: a premultiplied BGRA bitmap covering the whole
+/// window, drawn over the pet.
+struct OverlayTexture {
+    texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+    width: u32,
+    height: u32,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -76,6 +86,9 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     uniform: wgpu::Buffer,
     frame: FrameUniform,
+    overlay_pipeline: wgpu::RenderPipeline,
+    overlay_uniform: wgpu::Buffer,
+    overlay: Option<OverlayTexture>,
 }
 
 impl Renderer {
@@ -276,6 +289,43 @@ impl Renderer {
             cache: None,
         });
 
+        // The overlay quad covers the whole window. Its bitmap is already
+        // premultiplied, so transparent pixels leave the pet untouched.
+        let overlay_frame = FrameUniform {
+            uv: [0.0, 0.0, 1.0, 1.0],
+            bounds: [-1.0, 1.0, 1.0, -1.0],
+        };
+        let overlay_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("overlay quad"),
+            contents: bytemuck::bytes_of(&overlay_frame),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Ok(Self {
             surface,
             device,
@@ -287,6 +337,9 @@ impl Renderer {
             sampler,
             uniform,
             frame,
+            overlay_pipeline,
+            overlay_uniform,
+            overlay: None,
         })
     }
 
@@ -345,6 +398,98 @@ impl Renderer {
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&self.frame));
     }
 
+    /// Upload the software-drawn chat overlay, or stop drawing it. The
+    /// bitmap covers the whole window in physical pixels, so a resize
+    /// recreates the texture instead of scaling the old one.
+    pub fn set_overlay(&mut self, bitmap: Option<&OverlayBitmap>) {
+        let Some(bitmap) = bitmap else {
+            self.overlay = None;
+            return;
+        };
+        if bitmap.width == 0 || bitmap.height == 0 {
+            return;
+        }
+        debug_assert_eq!(
+            bitmap.pixels.len(),
+            (bitmap.width * bitmap.height * 4) as usize
+        );
+        let extent = wgpu::Extent3d {
+            width: bitmap.width,
+            height: bitmap.height,
+            depth_or_array_layers: 1,
+        };
+        let copy = wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bitmap.width * 4),
+            rows_per_image: Some(bitmap.height),
+        };
+        if let Some(overlay) = &self.overlay
+            && overlay.width == bitmap.width
+            && overlay.height == bitmap.height
+        {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &overlay.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bitmap.pixels,
+                copy,
+                extent,
+            );
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chat overlay"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // The bitmap stores premultiplied BGRA in sRGB encoding, like
+            // the pet atlas, and goes straight to the non-sRGB swapchain.
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bitmap.pixels,
+            copy,
+            extent,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("overlay bind group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.overlay_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.overlay = Some(OverlayTexture {
+            texture,
+            bind_group,
+            width: bitmap.width,
+            height: bitmap.height,
+        });
+    }
+
     pub fn render(&mut self) -> Result<()> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
@@ -386,6 +531,11 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..6, 0..1);
+            if let Some(overlay) = &self.overlay {
+                pass.set_pipeline(&self.overlay_pipeline);
+                pass.set_bind_group(0, &overlay.bind_group, &[]);
+                pass.draw(0..6, 0..1);
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);

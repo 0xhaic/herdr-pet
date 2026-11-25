@@ -534,6 +534,12 @@ mod overlay {
             self.button.setAlphaValue(opacity);
         }
 
+        /// AppKit draws the overlay with native views, so there is no bitmap
+        /// for the renderer to upload.
+        pub fn take_bitmap(&mut self) -> Option<crate::platform::OverlayBitmap> {
+            None
+        }
+
         /// Hide the bubble and/or the button. The chevron follows the bubble:
         /// down when expanded, up when collapsed or auto-hidden. The pager
         /// arrows follow both the bubble and their own visibility.
@@ -676,7 +682,7 @@ mod settings {
     use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 
     use crate::config::{Config, MAX_SIZE, MIN_SIZE};
-    use crate::platform::PanelAction;
+    use crate::platform::{PanelAction, UiState};
 
     const WIDTH: f64 = 320.0;
     const HEIGHT: f64 = 420.0;
@@ -696,21 +702,6 @@ mod settings {
     /// The tray/menu click that opened the panel must finish before outside
     /// clicks can close it again.
     const MONITOR_ARM_DELAY: Duration = Duration::from_millis(300);
-
-    /// Snapshot of the controls as they were last handed to or read from the
-    /// app; polling diffs against it, so no AppKit callbacks are needed.
-    #[derive(Clone, Copy, Debug, Default, PartialEq)]
-    struct UiState {
-        pet: isize,
-        size: f64,
-        opacity: f64,
-        notifications: bool,
-        notification_sound: bool,
-        gaze: bool,
-        click_through: bool,
-        hide_tray_icon: bool,
-        chat_open: bool,
-    }
 
     pub struct SettingsPanel {
         window: Retained<NSWindow>,
@@ -923,7 +914,7 @@ mod settings {
                 actions.push(action);
             }
             let current = self.read();
-            actions.extend(diff(&self.last, &current));
+            actions.extend(current.actions_since(&self.last));
             self.last = current;
             actions
         }
@@ -1124,40 +1115,6 @@ mod settings {
         }
     }
 
-    fn diff(previous: &UiState, current: &UiState) -> Vec<PanelAction> {
-        let mut actions = Vec::new();
-        if current.pet != previous.pet && current.pet >= 0 {
-            actions.push(PanelAction::SelectPet(current.pet as usize));
-        }
-        if current.size != previous.size {
-            actions.push(PanelAction::SetSize(current.size));
-        }
-        if current.opacity != previous.opacity {
-            actions.push(PanelAction::SetChatOpacity(current.opacity));
-        }
-        if current.notifications != previous.notifications {
-            actions.push(PanelAction::SetNotifications(current.notifications));
-        }
-        if current.notification_sound != previous.notification_sound {
-            actions.push(PanelAction::SetNotificationSound(
-                current.notification_sound,
-            ));
-        }
-        if current.gaze != previous.gaze {
-            actions.push(PanelAction::SetGaze(current.gaze));
-        }
-        if current.click_through != previous.click_through {
-            actions.push(PanelAction::SetClickThrough(current.click_through));
-        }
-        if current.hide_tray_icon != previous.hide_tray_icon {
-            actions.push(PanelAction::SetHideTrayIcon(current.hide_tray_icon));
-        }
-        if current.chat_open != previous.chat_open {
-            actions.push(PanelAction::SetChatOpen(current.chat_open));
-        }
-        actions
-    }
-
     /// Frame from top-left logical coordinates; AppKit views are placed from
     /// the content view's bottom-left corner.
     fn place(view: &NSView, x: f64, top: f64, width: f64, height: f64) {
@@ -1205,92 +1162,6 @@ mod settings {
         } else {
             NSControlStateValueOff
         });
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        fn base() -> UiState {
-            UiState {
-                pet: 0,
-                size: 104.0,
-                opacity: 0.7,
-                notifications: true,
-                notification_sound: true,
-                gaze: true,
-                click_through: false,
-                hide_tray_icon: false,
-                chat_open: true,
-            }
-        }
-
-        #[test]
-        fn identical_state_produces_no_actions() {
-            assert!(diff(&base(), &base()).is_empty());
-        }
-
-        #[test]
-        fn each_control_maps_to_its_action() {
-            let mut next = base();
-            next.pet = 2;
-            assert_eq!(diff(&base(), &next), vec![PanelAction::SelectPet(2)]);
-
-            let mut next = base();
-            next.size = 156.0;
-            assert_eq!(diff(&base(), &next), vec![PanelAction::SetSize(156.0)]);
-
-            let mut next = base();
-            next.opacity = 0.25;
-            assert_eq!(
-                diff(&base(), &next),
-                vec![PanelAction::SetChatOpacity(0.25)]
-            );
-
-            let mut next = base();
-            next.notifications = false;
-            assert_eq!(
-                diff(&base(), &next),
-                vec![PanelAction::SetNotifications(false)]
-            );
-
-            let mut next = base();
-            next.notification_sound = false;
-            assert_eq!(
-                diff(&base(), &next),
-                vec![PanelAction::SetNotificationSound(false)]
-            );
-
-            let mut next = base();
-            next.gaze = false;
-            assert_eq!(diff(&base(), &next), vec![PanelAction::SetGaze(false)]);
-
-            let mut next = base();
-            next.click_through = true;
-            assert_eq!(
-                diff(&base(), &next),
-                vec![PanelAction::SetClickThrough(true)]
-            );
-
-            let mut next = base();
-            next.hide_tray_icon = true;
-            assert_eq!(
-                diff(&base(), &next),
-                vec![PanelAction::SetHideTrayIcon(true)]
-            );
-
-            let mut next = base();
-            next.chat_open = false;
-            assert_eq!(diff(&base(), &next), vec![PanelAction::SetChatOpen(false)]);
-        }
-
-        #[test]
-        fn empty_pet_popup_is_ignored() {
-            let previous = base();
-            let mut current = base();
-            current.pet = -1;
-            assert!(diff(&previous, &current).is_empty());
-        }
     }
 }
 
