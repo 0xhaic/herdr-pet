@@ -7,15 +7,52 @@ on:
       - main
       # 功能分支在 Windows 上做里程碑验证，产出可下载的 exe。
       - "feat/**"
+    tags:
+      - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # 必须在任何 cargo 命令之前读取：cargo 会自动改写 Cargo.lock 的版本。
+      - name: Check version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          manifest_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          lock_version=$(sed -n '/^name = "herdr-pet"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$tag_version" != "$manifest_version" ] || [ "$manifest_version" != "$lock_version" ]; then
+            echo "version mismatch: tag=$GITHUB_REF_NAME Cargo.toml=$manifest_version Cargo.lock=$lock_version" >&2
+            exit 1
+          fi
+
+      - name: Check release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          # Tags created before notes were introduced fall back to the
+          # default branch so re-running them still works.
+          if [ ! -f "$notes" ]; then
+            git fetch --depth=1 origin "$DEFAULT_BRANCH"
+            mkdir -p "$(dirname "$notes")"
+            if ! git show FETCH_HEAD:"$notes" > "$notes"; then
+              echo "missing release notes: $notes" >&2
+              exit 1
+            fi
+          fi
+          if [ ! -s "$notes" ]; then
+            echo "empty release notes: $notes" >&2
+            exit 1
+          fi
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -47,3 +84,20 @@ jobs:
         with:
           name: herdr-pet-windows-x64
           path: dist/*.exe
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          notes="docs/release-notes/$tag.md"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/*.exe --clobber
+          else
+            # The macOS workflow may create the same release concurrently;
+            # if create loses that race, upload into the release it made.
+            gh release create "$tag" dist/*.exe --title "$tag" --notes-file "$notes" \
+              || gh release upload "$tag" dist/*.exe --clobber
+          fi

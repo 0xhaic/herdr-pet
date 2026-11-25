@@ -1,3 +1,7 @@
+// Release builds are GUI apps with no console; debug builds keep stderr so
+// errors stay visible while developing on Windows.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod chat;
 mod config;
 mod herdr;
@@ -1359,7 +1363,7 @@ impl App {
                     self.apply_tray_visibility();
                 }
                 Action::Settings => self.open_panel(),
-                Action::About => platform::show_about(),
+                Action::About => platform::show_about(self.window.as_deref()),
                 // Windows has no settings panel yet, so the menus own this
                 // switch; the tray icon stays visible while it is on.
                 #[cfg(target_os = "windows")]

@@ -277,7 +277,7 @@ pub fn send_notification(_message: &str) -> bool {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub fn show_about() {}
+pub fn show_about(_window: Option<&winit::window::Window>) {}
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn show_context_menu(_window: &winit::window::Window, _menu: &muda::Menu) {}

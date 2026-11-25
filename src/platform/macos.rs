@@ -155,7 +155,7 @@ pub fn send_notification(message: &str) -> bool {
 /// Show the About dialog for the tray menu. Must run on the main thread;
 /// the modal alert blocks the event loop until dismissed, and a click
 /// anywhere outside the dialog dismisses it.
-pub fn show_about() {
+pub fn show_about(_window: Option<&Window>) {
     about::show();
 }
 

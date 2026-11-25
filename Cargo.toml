@@ -18,6 +18,9 @@ tray-icon = "0.26.1"
 wgpu = "30.0.2"
 winit = "0.30.13"
 
+[build-dependencies]
+winresource = "0.1.34"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 resvg = { version = "0.50.0", default-features = false }
 windows-numerics = "0.3.1"

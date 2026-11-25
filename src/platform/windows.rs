@@ -28,16 +28,20 @@ use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
+use windows::Win32::UI::Controls::{
+    TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TD_INFORMATION_ICON, TDCBF_OK_BUTTON,
+    TDF_ALLOW_DIALOG_CANCELLATION, TaskDialogIndirect,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MB_TOPMOST, MessageBoxW, STYLESTRUCT, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, WM_STYLECHANGED, WM_STYLECHANGING, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    LWA_ALPHA, STYLESTRUCT, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    WM_STYLECHANGED, WM_STYLECHANGING, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TRANSPARENT,
 };
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 use winit::monitor::MonitorHandle;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -549,24 +553,62 @@ fn is_herdr_app_image(image: &Path) -> bool {
         })
 }
 
-/// About dialog. The development exe has no manifest, so comctl32 v6 and its
-/// TaskDialog are not available yet; the release milestone adds the manifest
-/// and can upgrade this to a task dialog with a clickable repository link.
-pub fn show_about() {
-    const REPOSITORY: &str = "github.com/0xhaic/herdr-pet";
+/// About dialog. The application manifest activates comctl32 v6, so the
+/// native task dialog is available; it is owned by the pet window and offers
+/// a button that opens the repository.
+pub fn show_about(window: Option<&Window>) {
+    const REPOSITORY: &str = "https://github.com/0xhaic/herdr-pet";
+    const OPEN_REPOSITORY: i32 = 1001;
     let body = format!(
         "由 herdr-core 中 agent 状态驱动的桌面宠物。\n\n版本 {}\n{REPOSITORY}",
         env!("CARGO_PKG_VERSION")
     );
-    let body: Vec<u16> = body.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = "herdr-pet".encode_utf16().chain(Some(0)).collect();
-    // SAFETY: both strings are live NUL-terminated wide buffers for the call.
+    let title: Vec<u16> = "关于 herdr-pet".encode_utf16().chain(Some(0)).collect();
+    let instruction: Vec<u16> = "herdr-pet".encode_utf16().chain(Some(0)).collect();
+    let content: Vec<u16> = body.encode_utf16().chain(Some(0)).collect();
+    let open_label: Vec<u16> = "打开仓库".encode_utf16().chain(Some(0)).collect();
+    let buttons = [TASKDIALOG_BUTTON {
+        nButtonID: OPEN_REPOSITORY,
+        pszButtonText: PCWSTR(open_label.as_ptr()),
+    }];
+    let config = TASKDIALOGCONFIG {
+        cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: window.and_then(hwnd).unwrap_or_default(),
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        dwCommonButtons: TDCBF_OK_BUTTON,
+        pszWindowTitle: PCWSTR(title.as_ptr()),
+        Anonymous1: TASKDIALOGCONFIG_0 {
+            pszMainIcon: TD_INFORMATION_ICON,
+        },
+        pszMainInstruction: PCWSTR(instruction.as_ptr()),
+        pszContent: PCWSTR(content.as_ptr()),
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
+        // Return opens nothing; the repository is an explicit choice.
+        nDefaultButton: 1,
+        ..Default::default()
+    };
+    let mut pressed = 0i32;
+    // SAFETY: every string and the button array outlive the call; the dialog
+    // runs modally on the main thread with the pet window as its owner.
+    match unsafe { TaskDialogIndirect(&config, Some(&mut pressed), None, None) } {
+        Ok(()) if pressed == OPEN_REPOSITORY => open_repository(REPOSITORY),
+        Ok(()) => {}
+        Err(error) => eprintln!("herdr-pet: cannot show the About dialog: {error}"),
+    }
+}
+
+fn open_repository(repository: &str) {
+    let url: Vec<u16> = repository.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: the URL is a live NUL-terminated wide string for the call.
     unsafe {
-        let _ = MessageBoxW(
+        let _ = ShellExecuteW(
             None,
-            PCWSTR(body.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK | MB_ICONINFORMATION | MB_TOPMOST,
+            w!("open"),
+            PCWSTR(url.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
         );
     }
 }
