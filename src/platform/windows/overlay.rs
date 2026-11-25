@@ -131,12 +131,17 @@ struct Frames {
 }
 
 /// Rasterized icon and the inputs it was built from.
+///
+/// The pixels are kept, but not the `ID2D1Bitmap`: Direct2D resources only
+/// work with the render target that created them, and the target is rebuilt
+/// whenever the window (or its DPI) changes size. Uploading ~28×28 pixels per
+/// paint is cheap and avoids a stale handle failing `EndDraw` with
+/// `D2DERR_WRONG_RENDER_TARGET` (0x88990015).
 struct IconBitmap {
     key: (PathBuf, bool, [u8; 3]),
     width: u32,
     height: u32,
     pixels: Vec<u8>,
-    bitmap: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap>,
 }
 
 /// A Direct2D device-context-free target that renders into a top-down DIB.
@@ -460,6 +465,9 @@ impl ChatOverlay {
                 return Ok(None);
             };
             self.target = Some(target);
+            // The icon raster was sized for the old target's DPI; let the next
+            // draw re-read it at the new scale.
+            self.icon_bitmap = None;
         }
         let render_target = {
             let Some(target) = self.target.as_mut() else {
@@ -649,47 +657,41 @@ impl ChatOverlay {
             width,
             height,
             pixels,
-            bitmap: None,
         });
     }
 
-    fn draw_icon(&mut self, rt: &ID2D1DCRenderTarget, layout: &ChatLayout) {
-        let Some(icon) = self.icon_bitmap.as_mut() else {
+    fn draw_icon(&self, rt: &ID2D1DCRenderTarget, layout: &ChatLayout) {
+        let Some(icon) = self.icon_bitmap.as_ref() else {
             return;
         };
-        if icon.bitmap.is_none() {
-            let properties = D2D1_BITMAP_PROPERTIES {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-            };
-            let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
-                width: icon.width,
-                height: icon.height,
-            };
-            // SAFETY: the pixel vec holds `width * height * 4` bytes and D2D
-            // copies them during CreateBitmap.
-            let created = unsafe {
-                match rt.CreateBitmap(
-                    size,
-                    Some(icon.pixels.as_ptr().cast()),
-                    icon.width * 4,
-                    &properties,
-                ) {
-                    Ok(bitmap) => bitmap,
-                    Err(error) => {
-                        eprintln!("herdr-pet: cannot upload the agent icon: {error}");
-                        return;
-                    }
+        let properties = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
+            width: icon.width,
+            height: icon.height,
+        };
+        // SAFETY: the pixel vec holds `width * height * 4` bytes and D2D copies
+        // them during CreateBitmap. The bitmap belongs to this paint's render
+        // target and is released with it before the next target can replace it.
+        let bitmap = unsafe {
+            match rt.CreateBitmap(
+                size,
+                Some(icon.pixels.as_ptr().cast()),
+                icon.width * 4,
+                &properties,
+            ) {
+                Ok(bitmap) => bitmap,
+                Err(error) => {
+                    eprintln!("herdr-pet: cannot upload the agent icon: {error}");
+                    return;
                 }
-            };
-            icon.bitmap = Some(created);
-        }
-        let Some(bitmap) = icon.bitmap.as_ref() else {
-            return;
+            }
         };
         let title_y = layout.bubble.y as f32 + TITLE_INSET_TOP;
         let left = layout.bubble.x as f32 + TEXT_INSET_X;
@@ -703,7 +705,7 @@ impl ChatOverlay {
         // SAFETY: both objects belong to this render target's thread.
         unsafe {
             rt.DrawBitmap(
-                bitmap,
+                &bitmap,
                 Some(&dest as *const D2D_RECT_F),
                 1.0,
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
