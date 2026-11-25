@@ -1,7 +1,8 @@
 # herdr-pet Windows 适配方案
 
 > 状态：M0–M3 已通过 Windows 实机验收（多显示器项按用户要求跳过；M2 提示音待听感
-> 确认）。M4 未开始。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
+> 确认）；M4 已实现并完成发布前实机验证，随 v0.1.20 发布。实施期间本文作为
+> Windows 平台的设计、里程碑和验收依据。
 >
 > M0/M1 实施记录（2026-11-25）：Windows CI（`windows-latest`）通过 fmt、clippy
 > `-D warnings`、测试与 release 构建；产物在 Windows 11（3600×2260，200% 缩放）
@@ -464,6 +465,15 @@ DPI 下的栅格。旧构建用 `SetWindowPos` 改变窗口尺寸即可稳定复
 
 → 验证：用户执行验收清单第 12 项；推送 tag 后 CI 校验版本与 `docs/release-notes/v<version>.md`，Release 同时包含 dmg 与 exe；用户在干净 Windows 机器上直接运行单 exe 完成验收。
 
+→ 已实现并完成发布前实机验证（2026-11-25）：release 构建为 GUI 子系统（PE
+subsystem=2，无控制台窗口），exe 内嵌 6 种尺寸图标与 comctl32 v6 manifest；
+`winresource` 只在 Windows 主机构建时编译资源，macOS 交叉 clippy 照常通过。
+「关于」升级为 TaskDialog，实机确认显示版本、仓库地址与「打开仓库」按钮，关闭后
+气泡与托盘菜单不受影响。Windows CI 增加 `v*` tag 触发：先校验 tag、
+`Cargo.toml`、`Cargo.lock` 版本与发布说明，再把 exe 上传到与 macOS dmg 相同的
+Release（并发创建 Release 时回退为 upload）。验收清单第 12 项（干净机器运行）待
+用户在发布后执行。
+
 ## 7. Windows 手动验收清单
 
 每个里程碑至少覆盖相关项：
@@ -509,8 +519,9 @@ DPI 下的栅格。旧构建用 `SetWindowPos` 改变窗口尺寸即可稳定复
 2. ~~M1~~：已通过实机验收（多显示器按用户要求跳过）；
 3. ~~M2~~：已实现；Toast 与点击跳转已实机验证，提示音待听感确认；
 4. ~~M3~~：已实现并完成合成鼠标验证；第 7–8 项真实鼠标验收已通过；
-5. 下一步 M4：发布（`windows_subsystem`、exe 图标与 manifest、Windows CI 发布
-   job、README/design/release notes），manifest 落地后把“关于”升级为 TaskDialog。
+5. ~~M4~~：已实现（`windows_subsystem`、exe 图标与 manifest、TaskDialog、Windows
+   CI 发布 job、README/design/release notes）；随 v0.1.20 发布，验收清单第 12 项
+   （干净 Windows 机器直接运行单 exe）待用户执行。
 
 实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。M3 另确认：Direct2D DC render target 与
 DirectComposition 共存正常；`WS_EX_TOOLWINDOW` 设置窗口 + 跨线程 owner 的

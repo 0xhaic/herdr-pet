@@ -1,6 +1,6 @@
 # herdr-pet
 
-macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时状态驱动。
+macOS / Windows 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时状态驱动。
 宠物素材沿用 Codex 格式，程序本身不内置任何宠物。
 
 ## 特性
@@ -63,19 +63,22 @@ macOS 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 的实时�
 
 ## 前置条件
 
-- macOS（首版仅支持 macOS）。
-- Rust stable 与 Cargo（本项目按 1.100 验证）。rustup 安装后若 `cargo` 不在 PATH，先执行
-  `source "$HOME/.cargo/env"`。
-- 本机正在运行 herdr-core。程序通过 Unix socket 订阅事件，发现顺序为
+- macOS，或 Windows 10 1809+ / Windows 11（x64）。使用 Windows 预编译 exe 时无需
+  Rust 与 Windows SDK。
+- Rust stable 与 Cargo（从源码构建时；本项目按 1.100 验证）。rustup 安装后若
+  `cargo` 不在 PATH，先执行 `source "$HOME/.cargo/env"`。
+- 本机正在运行 herdr-core。macOS 通过 Unix socket 订阅事件，发现顺序为
   `HC_TERMINAL_SOCKET` → `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock`
-  （session 取 `HC_SESSION`，默认 `default`）；连接断开时后台自动重连，宠物保留最后状态。
-- 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`），
-  目录内包含 `pet.json` 与 `spritesheet.webp`；可在设置面板中改用其它宠物目录。
-- Herdr.app（可选）：前台判断使用 `NSWorkspace`，点击跳转通过
-  `herdr-app do agent.focus`（普通 agent）或 `terminal.peek`（子 agent）实现；
-  气泡标题行的 agent 图标也读取 Herdr.app 的
-  program 图标目录。未安装或找不到时宠物其余功能正常，图标隐藏，点击只会尝试
-  打开 Herdr。
+  （session 取 `HC_SESSION`，默认 `default`）；Windows 通过
+  `hc connect --session <session>` 子进程读写 JSON-RPC，需要 `hc` 在 PATH 中。
+  连接断开时后台自动重连，宠物保留最后状态。
+- 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`，
+  Windows 为 `%USERPROFILE%\.codex\pets`），目录内包含 `pet.json` 与
+  `spritesheet.webp`；可在设置面板中改用其它宠物目录。
+- Herdr.app（macOS）/ Herdr（Windows，可选）：前台判断、点击跳转与气泡标题行的
+  Agent 图标都依赖它；未安装或找不到时宠物其余功能正常，图标隐藏，点击只会
+  尝试打开 Herdr。macOS 通过 `herdr-app do agent.focus`（普通 agent）或
+  `terminal.peek`（子 agent）跳转，Windows 识别 `herdr-app.exe` / `Herdr.exe`。
 
 ## 构建与运行
 
@@ -119,18 +122,38 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 推送到 GitHub 后，`.github/workflows/macos-release.yml` 可在 CI 中打包：
 
-- 推送 `v*` tag（如 `v0.1.19`）自动触发，或从 Actions 页面手动触发；
+- 推送 `v*` tag（如 `v0.1.20`）自动触发，或从 Actions 页面手动触发；
 - tag 构建先校验 tag 名与 `Cargo.toml`、`Cargo.lock` 中的版本一致，不一致直接失败；
 - 发布前必须在 `docs/release-notes/<tag>.md` 编写版本说明（如
-  `docs/release-notes/v0.1.19.md`）；tag 构建校验文件存在，旧 tag 缺失时从默认
+  `docs/release-notes/v0.1.20.md`）；tag 构建校验文件存在，旧 tag 缺失时从默认
   分支读取，仍缺失直接失败；
 - 先运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`；
 - 交叉编译 arm64，产出 `herdr-pet-<version>-macos-arm64.dmg` 并上传为 artifact；
-- tag 构建用该说明文件创建或更新同名 GitHub Release，并附带该 dmg
+- `.github/workflows/windows-build.yml` 在同一个 tag 上构建 Windows x64 exe，
+  与 macOS dmg 一起发布到同一个 GitHub Release；
+- tag 构建用该说明文件创建或更新同名 GitHub Release，并附带该 dmg 与 exe
   （手动触发只产出 artifact）。
 
 下载的 dmg 未签名/未公证，首次启动需右键 → 打开，
 或执行 `xattr -dr com.apple.quarantine /Applications/herdr-pet.app`。
+
+## Windows
+
+从 [GitHub Releases](https://github.com/0xhaic/herdr-pet/releases)
+下载 `herdr-pet-<version>-windows-x64.exe`，放到任意目录双击运行；单文件、无安装器。
+Release 构建不显示控制台窗口。
+
+- 首次运行时 Windows SmartScreen 可能拦截：点击「更多信息」→「仍要运行」。
+- 配置路径为 `%APPDATA%\herdr-pet\config.json`；宠物目录、位置等设置与 macOS 共用。
+- 宠物透明像素点击穿透；右键宠物可打开设置/关于/退出菜单（设置面板中的「隐藏
+  托盘图标」开启后同样可用）。托盘菜单还包含「点击穿透」开关。
+- 需要本机可执行 `hc`（herdr-core）；Herdr 可选，用于前台判断、点击跳转与 Agent
+  图标。未安装 Herdr 时宠物仍显示，点击只尝试打开 Herdr。
+- 首版无真实背景模糊，气泡使用半透明填充；设置面板为经典 Win32 外观；多显示器
+  混合 DPI 尚未验证。
+- Windows 产物由 `.github/workflows/windows-build.yml` 在 Windows CI 构建：推送
+  到 `main` / `feat/**` 产出可下载 artifact；`v*` tag 会把 exe 与 macOS dmg 发布
+  到同一个 GitHub Release。
 
 ## 菜单栏
 
@@ -143,7 +166,8 @@ macOS 会请求一次通知权限，允许后生效。`cargo run` 直接运行�
 
 托盘图标是与应用图标同轮廓的方形模板图（`assets/tray-icon.png`，22 pt @2x，源文件
 `assets/tray-icon.svg`）：圆角底板实心、猫头镂空；作为 macOS 模板图随菜单栏明暗自动
-反色；切换宠物不改变它。
+反色；切换宠物不改变它。Windows 使用同一图标的彩色版本，显示在任务栏通知区域，
+菜单项相同，并在两个菜单中额外提供「点击穿透」开关。
 所有设置项都在设置面板中；面板中的修改会写回配置文件。
 
 在设置面板中开启「隐藏托盘图标」后，菜单栏图标隐藏；此时在宠物本体上右键可打开
@@ -221,9 +245,11 @@ herdr-core 清除终端状态时（例如 agent 退出、root shell 回到前台
 
 ## 限制与已知问题
 
-- 仅支持 macOS（CI 仅产出 arm64 构建）；从源码运行，或使用 `scripts/bundle.sh`
-  自行打包，或下载 GitHub Actions 产出的未签名/未公证 `.app`。
+- macOS 仅提供 arm64 构建；Windows 提供 x64 单文件 exe。两者均未签名/未公证，
+  按上文处理 Gatekeeper 与 SmartScreen。
 - 多显示器、混合缩放下全局坐标按主屏换算，宠物放在副屏时位置/凝视可能有偏差。
+- Windows 首版无真实背景模糊，设置面板为经典 Win32 浅色外观；多显示器混合 DPI
+  未验证。Release 构建不显示控制台，运行期错误不可见。
 - 前台判断每 250 ms 查询一次 `NSWorkspace`；Herdr 在前台时聊天 UI 整体隐藏，切走后
   恢复。Herdr 启动中的点击跳转依赖 5 秒内完成启动，极慢的冷启动可能需要再点一次。
 - Herdr 在前台时无法通过箭头展开/收起气泡（按当前显示规则，整个聊天 UI 不可见）。

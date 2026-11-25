@@ -36,6 +36,9 @@
 > 托盘精简为显示/隐藏、设置、关于、退出。`cargo test`（100 项）、`cargo build`、
 > `cargo clippy --all-targets -- -D warnings` 全绿，已实机验证设置面板与现有
 > 聊天框、拖动及配置持久化行为。
+> v0.1.20：新增 Windows x64 版本（透明置顶宠物、Direct2D 气泡、逐像素点击穿透、
+> Win32 设置面板、Toast/提示音、任务栏托盘与单文件 exe）；平台设计、里程碑与
+> 验收记录见 [`windows-port.md`](windows-port.md)。
 
 Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 herdr-core。
 
@@ -43,9 +46,10 @@ Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 h
 
 ### 目标
 
-- 一个独立运行的 macOS 桌面宠物：透明、无边框、置顶、可拖拽、点击透明区域穿透。
+- 一个独立运行的 macOS / Windows 桌面宠物：透明、无边框、置顶、可拖拽、点击透明区域穿透。
 - 读取 `~/.codex/pets/<name>/` 下的 Codex 宠物（`pet.json` + `spritesheet.webp`），不改格式、不内置素材。
-- 通过 herdr-core 的 Unix socket JSON-RPC 订阅 agent 状态，驱动宠物动画。
+- 通过 herdr-core 的 JSON-RPC 订阅 agent 状态，驱动宠物动画（macOS 为 Unix socket，
+  Windows 为 `hc connect` 子进程）。
 - 汇总全部 agent：一只宠物反映当前最紧急的状态，并在 blocked/done 时提醒。
 
 ### 已确认决策
@@ -60,7 +64,7 @@ Rust 桌面宠物：复刻 Codex 桌面版的宠物表现，宠物状态来自 h
 
 ### 非目标
 
-- 不做多平台适配；首版仅 macOS，平台代码隔离，后续可扩展。
+- 不做 Linux 适配；平台代码隔离，Windows 已在 v0.1.20 交付。
 - 不下载、不分发 Codex 官方宠物素材（授权限制）。
 
 ## 2. 总体架构
@@ -572,6 +576,23 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 - 测试锚点：attention 的 seen 地址解析、`is_active_with` 的 done 分支、点击阈值
   与可见性组合逻辑、子 agent 的跳转命令映射；子进程跳转路径不做单测。
 
+### 3.12 Windows 平台
+
+Windows 与 macOS 共用 `pet/status/chat/herdr_app/config` 等逻辑，平台差异集中在
+`platform/windows.rs`、`platform/windows/overlay.rs` 与 `platform/windows/settings.rs`；
+完整设计、里程碑与验收清单见 [`windows-port.md`](windows-port.md)。
+
+- 传输：通过 `hc connect --session <session>` 子进程读写 JSON-RPC；断开后自动重连。
+- 窗口：winit + DirectComposition（`DxgiFromVisual`）；`WS_EX_NOACTIVATE |
+  WS_EX_TOOLWINDOW` 保持无焦点与无 Alt+Tab 条目；用窗口 region 把宠物 alpha
+  区域与气泡/按钮矩形之外的像素设为穿透。
+- 气泡：Direct2D/DirectWrite 渲染到 32 位 top-down DIB，wgpu 作为 overlay 纹理
+  合成；主题读取 Windows 个性化设置，图标用 resvg 栅格化 Herdr SVG。
+- 设置与关于：原生 Win32 无模式窗口；关于使用 comctl32 v6 TaskDialog（exe 内嵌
+  manifest 激活），可打开仓库。
+- 发布：单文件 x64 exe；`windows-build.yml` 在 `v*` tag 上把 exe 与 macOS dmg
+  发布到同一个 GitHub Release。
+
 ## 4. 错误处理与健壮性
 
 - 边界用 `anyhow::Result`；运行时路径禁止 `unwrap()`（测试除外）。
@@ -644,6 +665,8 @@ herdr-core 的事件流，也不停止/重启用户的 Herdr 或 core。
 | M4 | 拖拽、凝视、点击穿透、托盘 | 手工交互 |
 | M5 | 提醒、音效、配置持久化 | 触发真实状态 |
 | M6 | 手工回归、CLAUDE.md 与文档校准 | 全量检查 |
+
+Windows 适配的 M0–M4 里程碑独立记录在 [`windows-port.md`](windows-port.md)。
 
 ## 7. 风险与待定项
 
