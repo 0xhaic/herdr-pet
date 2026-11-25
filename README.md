@@ -70,7 +70,8 @@ macOS / Windows 桌面宠物：宠物动画由本机 herdr-core 中所有 agent 
 - 本机正在运行 herdr-core。macOS 通过 Unix socket 订阅事件，发现顺序为
   `HC_TERMINAL_SOCKET` → `$XDG_STATE_HOME/herdr-core/<session>/<session>.sock`
   （session 取 `HC_SESSION`，默认 `default`）；Windows 通过
-  `hc connect --session <session>` 子进程读写 JSON-RPC，需要 `hc` 在 PATH 中。
+  `hc connect --session <session>` 子进程读写 JSON-RPC，需要本机安装 herdr-core
+  （查找 `hc.exe` / `herdr-core.exe`：PATH → `%LOCALAPPDATA%\Programs\herdr-core`）。
   连接断开时后台自动重连，宠物保留最后状态。
 - 至少一只 Codex 宠物，位于 `$CODEX_HOME/pets`（默认 `~/.codex/pets/<name>/`，
   Windows 为 `%USERPROFILE%\.codex\pets`），目录内包含 `pet.json` 与
@@ -147,7 +148,8 @@ Release 构建不显示控制台窗口。
 - 配置路径为 `%APPDATA%\herdr-pet\config.json`；宠物目录、位置等设置与 macOS 共用。
 - 宠物透明像素点击穿透；右键宠物可打开设置/关于/退出菜单（设置面板中的「隐藏
   托盘图标」开启后同样可用）。托盘菜单还包含「点击穿透」开关。
-- 需要本机可执行 `hc`（herdr-core）；Herdr 可选，用于前台判断、点击跳转与 Agent
+- 需要本机安装 herdr-core（自动查找 PATH 与 `%LOCALAPPDATA%\Programs\herdr-core`
+  下的 `hc.exe` / `herdr-core.exe`）；Herdr 可选，用于前台判断、点击跳转与 Agent
   图标。未安装 Herdr 时宠物仍显示，点击只尝试打开 Herdr。
 - 首版无真实背景模糊，气泡使用半透明填充；设置面板为经典 Win32 外观；多显示器
   混合 DPI 尚未验证。
