@@ -1,8 +1,7 @@
 # herdr-pet Windows 适配方案
 
-> 状态：M0–M2 已通过 Windows 实机验收（多显示器项按用户要求跳过；M2 提示音待听感
-> 确认）；M3 已实现并完成合成鼠标验证，第 7–8 项的真实鼠标验收待用户确认。M4 未
-> 开始。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
+> 状态：M0–M3 已通过 Windows 实机验收（多显示器项按用户要求跳过；M2 提示音待听感
+> 确认）。M4 未开始。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
 >
 > M0/M1 实施记录（2026-11-25）：Windows CI（`windows-latest`）通过 fmt、clippy
 > `-D warnings`、测试与 release 构建；产物在 Windows 11（3600×2260，200% 缩放）
@@ -444,7 +443,7 @@ target 渲染预乘 BGRA 位图，wgpu 增加 overlay 纹理/pipeline；气泡�
 均实机确认；拖到屏幕顶边时气泡翻到下方，窗口 region 随气泡/按钮更新。设置面板
 （`herdr_pet_settings`）能即时修改提醒、大小、不透明度与点击穿透并写入配置，目录
 选择器正常弹出并可取消，面板外点击关闭；关于显示版本与仓库地址。真实鼠标验收
-（第 7–8 项）待用户执行；TaskDialog 与设置面板深色换肤不在 M3 范围。
+（第 7–8 项，2026-11-25）已通过；TaskDialog 与设置面板深色换肤不在 M3 范围。
 
 → 后续修复（2026-11-25，用户实机遇到后定位）：调整宠物大小（或跨 DPI）会重建
 `ID2D1DCRenderTarget`；之前缓存的 Agent 图标 `ID2D1Bitmap` 属于旧目标，下一次
@@ -509,7 +508,7 @@ DPI 下的栅格。旧构建用 `SetWindowPos` 改变窗口尺寸即可稳定复
 1. ~~M0~~：已完成并在 Windows 实机跑通；
 2. ~~M1~~：已通过实机验收（多显示器按用户要求跳过）；
 3. ~~M2~~：已实现；Toast 与点击跳转已实机验证，提示音待听感确认；
-4. ~~M3~~：已实现并完成合成鼠标验证；第 7–8 项真实鼠标验收待用户执行；
+4. ~~M3~~：已实现并完成合成鼠标验证；第 7–8 项真实鼠标验收已通过；
 5. 下一步 M4：发布（`windows_subsystem`、exe 图标与 manifest、Windows CI 发布
    job、README/design/release notes），manifest 落地后把“关于”升级为 TaskDialog。
 
