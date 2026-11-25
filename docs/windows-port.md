@@ -1,7 +1,8 @@
 # herdr-pet Windows 适配方案
 
 > 状态：M0–M2 已通过 Windows 实机验收（多显示器项按用户要求跳过；M2 提示音待听感
-> 确认）。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
+> 确认）；M3 已实现并完成合成鼠标验证，第 7–8 项的真实鼠标验收待用户确认。M4 未
+> 开始。实施期间本文作为 Windows 平台的设计、里程碑和验收依据。
 >
 > M0/M1 实施记录（2026-11-25）：Windows CI（`windows-latest`）通过 fmt、clippy
 > `-D warnings`、测试与 release 构建；产物在 Windows 11（3600×2260，200% 缩放）
@@ -21,15 +22,24 @@
 > 触发 Toast（显示“osc-test2 等待输入”，`LastNotificationAddedTime` 同步更新）；
 > 提示音走系统别名，待用户确认听感。
 >
-> 多显示器/混合 DPI（第 3 项）按用户要求跳过，未验证；设置/关于（第 6 项）随 M3
-> 交付。此前合成点击的辅助验证：窗口 region 生效（COMPLEXREGION，约 440 个矩形），
-> 透明区域的点击送达另一进程窗口，宠物本体不穿透；仅 `WS_EX_TRANSPARENT` 的整窗
-> 开关无效，改为 `WS_EX_TRANSPARENT | WS_EX_LAYERED` +
+> 多显示器/混合 DPI（第 3 项）按用户要求跳过，未验证。此前合成点击的辅助验证：
+> 窗口 region 生效（COMPLEXREGION，约 440 个矩形），透明区域的点击送达另一进程
+> 窗口，宠物本体不穿透；仅 `WS_EX_TRANSPARENT` 的整窗开关无效，改为
+> `WS_EX_TRANSPARENT | WS_EX_LAYERED` +
 > `SetLayeredWindowAttributes(255, LWA_ALPHA)` 后，命中测试忽略整窗，且
 > DirectComposition 内容截图前后逐像素一致。
 >
-> 已知限制：托盘“设置…/关于”暂无响应（M3）；气泡与按钮仍是空壳，前台隐藏效果要到
-> M3 才可见；Toast 暂用系统默认图标（exe 图标随 M4）；多显示器混合 DPI 未验证
+> M3 实机验证（2026-11-25，合成鼠标）：Direct2D 气泡正常显示（粗体标题、副标题、
+> Agent 图标、done/blocked 状态图标、working 旋转 spinner、分页箭头、展开/收起
+> 按钮；长标题带省略号）；靠近屏幕顶边时气泡翻到宠物下方并重排按钮；点击气泡拉起
+> Herdr 并聚焦当前 agent；点击穿透像素按预期落到下层窗口。设置面板从宠物右键菜单
+> 打开，六个开关、大小与不透明度滑杆、目录选择、面板外点击关闭均正常，修改即时
+> 生效并写入配置；“关于”显示版本与仓库地址。第 7–8 项的**真实鼠标**验收待用户
+> 确认。
+>
+> 已知限制：无真实背景模糊（半透明填充）；设置面板为经典 Win32 浅色外观（不随
+> 系统深色模式换肤）；“关于”暂用 MessageBox，TaskDialog 需 M4 的 comctl32 v6
+> manifest；Toast 暂用系统默认图标（exe 图标随 M4）；多显示器混合 DPI 未验证
 > （按用户要求跳过）。
 
 ## 1. 已确认决策
@@ -251,28 +261,49 @@ Windows 首版不追求真实模糊，使用半透明填充：
 - macOS 的 `NSVisualEffectView` 保持不变，`take_bitmap()` 在 macOS 返回 `None`；
 - 点击命中继续由 `main.rs` 的矩形判定处理，不需要第二套输入窗口。
 
-细节：
+实现细节（M3 已落地）：
 
-- 字体：`Microsoft YaHei UI`，缺失时回落 `Segoe UI`；DWrite 自动处理缺字回退；文字抗锯齿用灰度，避免透明背景上的 ClearType 彩边；
-- 主题：读取 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`，选择深/浅色玻璃、文字与描边；
+- `ChatOverlay` 用 `ID2D1DCRenderTarget` 绑定 32 位 top-down DIB（预乘 BGRA），
+  按窗口物理尺寸渲染后由 `take_bitmap()` 交给 wgpu 上传为 `Bgra8Unorm` 纹理，
+  以 `ONE, ONE_MINUS_SRC_ALPHA` 混合画在宠物 quad 之后；
+- 字体：DirectWrite `Microsoft YaHei UI`，粗体标题 + 常规正文；灰度抗锯齿避免透明
+  背景上的 ClearType 彩边；正文用 `SetTrimming` 做尾部省略号；
+- 主题：读取 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`，
+  每 2 秒轮询一次；深色主题用浅色文字 + 深色玻璃，浅色主题反之；
 - `chat_opacity` 只作用于玻璃层与描边，文字和图标保持不透明；
-- Agent 图标：用 `resvg` 栅格化 Herdr 的 SVG，`tint` 时按主题改 RGB 并保留 alpha；文件缺失时隐藏图标并恢复文字宽度；
-- 状态图标：用矢量路径绘制月亮/手/对勾/叉/省略号，不依赖 `Segoe Fluent Icons` 码点；
-- 工作中的 spinner：在 `take_bitmap()` 内按时间节流重绘，不额外开定时器；
-- 气泡翻到下方、横移、收起、pager 出现/消失时重新栅格化；
+- Agent 图标：`resvg 0.50`（关闭默认特性）把 Herdr 的 SVG 栅格化为 2× 尺寸位图，
+  `tint` 时按主题文字色在预乘空间改 RGB 并保留 alpha；按路径/主题缓存，失败时
+  隐藏图标并恢复标题宽度；
+- 状态图标：用 Direct2D 基本图元绘制（Idle 用 “Z” 字形、Blocked 用感叹号、Done
+  对勾、Error 叉、无 agent 省略号），不依赖图标字体码点；
+- 工作中的 spinner：10 个半径渐变的圆点绕圈旋转，在 `take_bitmap()` 内以 33ms
+  节流重绘，不额外开定时器；
+- 气泡翻到下方、横移、收起、pager 出现/消失、窗口 DPI 改变时重新栅格化；
+- 命中区域在宠物 alpha run 之外并入气泡与按钮矩形，绘制出来的 UI 才能收到点击；
 - 不支持真实背景模糊，README 标注为 Windows 首版差异。
 
 ### 4.6 设置面板
 
-用原生 Win32 无模式窗口，不引入第二套 GUI 框架：
+用原生 Win32 无模式窗口，不引入第二套 GUI 框架（M3 已落地）：
 
-- 控件：`COMBOBOX`（宠物）、静态文本（目录）、两个按钮、`TRACKBAR`（大小/不透明度）、6 个 `AUTOCHECKBOX`、底部说明；
-- 沿用 macOS 的轮询设计：每 tick 读取控件状态，与 `UiState` diff 后生成 `PanelAction`；程序化同步后更新 `last`，避免回环；
-- 字体 `Microsoft YaHei UI` 9pt，按 `GetDpiForWindow()` 缩放；处理 `WM_DPICHANGED`；
-- 目录选择：`IFileOpenDialog` + `FOS_PICKFOLDERS`，`CoInitializeEx` 容忍已初始化；
-- 关闭按钮：`WM_CLOSE` 只隐藏窗口，保留实例；
-- 点击面板外关闭：沿用 300ms 延迟，轮询左键按下沿 + 面板矩形判断，存在模态对话框时豁免；
-- `click_through` 开启时禁用「隐藏托盘图标」勾选框，与 macOS 一致。
+- 自建窗口类 `herdr_pet_settings`，`WS_CAPTION | WS_SYSMENU` +
+  `WS_EX_TOOLWINDOW`；打开时置顶并尝试 `SetForegroundWindow`，关闭按钮与 Esc
+  只隐藏窗口，实例保留；
+- 控件：`COMBOBOX`（宠物）、静态文本（目录，`SS_ENDELLIPSIS`）、两个按钮、
+  `TRACKBAR`（大小 ×10、不透明度 ×100 的整数映射）、6 个 `BS_AUTOCHECKBOX`、
+  底部说明；字体 `Microsoft YaHei UI` 9pt；
+- 沿用 macOS 的轮询设计：每 tick 读取控件状态，与共享的 `UiState` diff 后生成
+  `PanelAction`；程序化同步后更新 `last`，避免回环；
+- 初始 DPI 取 `GetDpiForSystem()`；`WM_DPICHANGED` 应用系统建议矩形并记录新 DPI，
+  下一次轮询重建字体、按逻辑坐标重排所有子控件；
+- 目录选择：`IFileOpenDialog` + `FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM`。主线程
+  已被 WinRT Toast 初始化为 MTA，因此选择器放在独立的 STA 线程，对话框以面板为
+  owner；结果经 channel 回传，下一次轮询生效；
+- 点击面板外关闭：300ms 延迟后轮询左键按下沿 + `GetWindowRect`；目录选择器打开
+  期间用原子标志豁免；
+- `click_through` 开启时禁用「隐藏托盘图标」勾选框，与 macOS 一致；
+- “关于”用 `MessageBoxW` 显示版本与仓库地址（带 `MB_TOPMOST`）。TaskDialog 依赖
+  comctl32 v6，留到 M4 的 manifest 一起启用。
 
 ### 4.7 托盘、通知与关于
 
@@ -298,7 +329,8 @@ Windows 首版不追求真实模糊，使用半透明填充：
 
 关于：
 
-- `TaskDialog` 显示版本号（`CARGO_PKG_VERSION`）和仓库超链接；不可用时回落 `MessageBoxW`；
+- M3 使用 `MessageBoxW` 显示版本号（`CARGO_PKG_VERSION`）与仓库地址；M4 加入
+  common-controls v6 manifest 后再升级为 `TaskDialog` + 可点击链接；
 - 模态期间阻塞事件循环，与 macOS 现行为一致。
 
 ### 4.8 路径与配置
@@ -405,6 +437,14 @@ Herdr 并聚焦当前 agent；提示音走 `PlaySoundW`（听感待用户确认�
 
 → 验证：用户执行验收清单第 7–8 项；确认无真实模糊但半透明填充可读、可点击、可收起。
 
+→ 已实现并完成合成鼠标验证（2026-11-25）：`ChatOverlay` 以 Direct2D DC render
+target 渲染预乘 BGRA 位图，wgpu 增加 overlay 纹理/pipeline；气泡文字、Herdr SVG
+图标、done/blocked/working 状态、旋转 spinner、分页箭头、展开/收起、长标题省略号
+均实机确认；拖到屏幕顶边时气泡翻到下方，窗口 region 随气泡/按钮更新。设置面板
+（`herdr_pet_settings`）能即时修改提醒、大小、不透明度与点击穿透并写入配置，目录
+选择器正常弹出并可取消，面板外点击关闭；关于显示版本与仓库地址。真实鼠标验收
+（第 7–8 项）待用户执行；TaskDialog 与设置面板深色换肤不在 M3 范围。
+
 ### M4 发布
 
 内容：
@@ -461,6 +501,10 @@ Herdr 并聚焦当前 agent；提示音走 `PlaySoundW`（听感待用户确认�
 1. ~~M0~~：已完成并在 Windows 实机跑通；
 2. ~~M1~~：已通过实机验收（多显示器按用户要求跳过）；
 3. ~~M2~~：已实现；Toast 与点击跳转已实机验证，提示音待听感确认；
-4. 下一步 M3：气泡与设置面板（含托盘“设置/关于”），最后 M4 发布与文档更新。
+4. ~~M3~~：已实现并完成合成鼠标验证；第 7–8 项真实鼠标验收待用户执行；
+5. 下一步 M4：发布（`windows_subsystem`、exe 图标与 manifest、Windows CI 发布
+   job、README/design/release notes），manifest 落地后把“关于”升级为 TaskDialog。
 
-实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。
+实施过程中在 Windows 实机确认以下未定项，并回填本文：Herdr app home、`Herdr.exe` / `herdr-app.exe` 实际路径、Toast 是否需要 Start Menu 快捷方式、任务栏在多显示器下的 `rcWork` 行为。M3 另确认：Direct2D DC render target 与
+DirectComposition 共存正常；`WS_EX_TOOLWINDOW` 设置窗口 + 跨线程 owner 的
+`IFileOpenDialog` 能正常置于置顶面板之上；`GetDpiForWindow` 在 200% 缩放下返回 192。
